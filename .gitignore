@@ -138,3 +138,6 @@ build
 # Mac OS files
 
 .DS_Store
+
+output
+output/*

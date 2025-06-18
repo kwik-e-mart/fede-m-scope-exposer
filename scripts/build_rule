@@ -1,0 +1,12 @@
+#!/bin/bash
+
+INGRESS_NAME=$(kubectl get ingress -n "$K8S_NAMESPACE" -l "scope_id=$SCOPE_ID" -o jsonpath="{.items[0].metadata.name}")
+
+INGRESS=$(kubectl get ingress -n "$K8S_NAMESPACE" "$INGRESS_NAME" -o json)
+
+SCOPE_RULE=$(echo "$INGRESS" | jq '{
+    blue_green_annotation: .metadata.annotations["alb.ingress.kubernetes.io/actions.bg-deployment"],
+    service: .spec.rules[0].http.paths[0].backend.service
+}')
+
+export SCOPE_RULE

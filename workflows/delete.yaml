@@ -1,0 +1,8 @@
+configuration:
+  K8S_NAMESPACE: nullplatform
+include:
+  - "$SERVICE_PATH/workflows/create.yaml"
+steps:
+  - name: apply
+    configuration:
+      ACTION: delete
