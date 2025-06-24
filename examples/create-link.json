@@ -23,7 +23,9 @@
     "service": {
       "id": "4f3fc1da-10bf-47e7-8dd8-b9febc3ddea1",
       "slug": "the-service-name-from-the-user",
-      "attributes": {},
+      "attributes": {
+        "domain": "some-domain.com"
+      },
       "specification": {
         "id": "e820250b-62e3-4e20-8647-dd41b20d1bb9",
         "slug": "publish"

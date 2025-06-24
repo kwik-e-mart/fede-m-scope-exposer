@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 echo "TEMPLATE DIR: $OUTPUT_DIR, ACTION: $ACTION, DRY_RUN: $DRY_RUN"
 
 # Find all .yaml files that were not yet applied / deleted

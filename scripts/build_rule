@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 INGRESS_NAME=$(kubectl get ingress -n "$K8S_NAMESPACE" -l "scope_id=$SCOPE_ID" -o jsonpath="{.items[0].metadata.name}")
 
 INGRESS=$(kubectl get ingress -n "$K8S_NAMESPACE" "$INGRESS_NAME" -o json)

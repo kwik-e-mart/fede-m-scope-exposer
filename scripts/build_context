@@ -1,7 +1,10 @@
 #!/bin/bash
 
+set -euo pipefail
+
 SERVICE_ID=$(echo "$CONTEXT" | jq -r .service.id)
 SERVICE_NAME=$(echo "$CONTEXT" | jq -r .service.slug)
+
 ACTION_ID=$(echo "$CONTEXT" | jq -r .id)
 ACTION_NAME=$(echo "$CONTEXT" | jq -r .slug)
 
@@ -13,7 +16,9 @@ CONTEXT=$(echo "$CONTEXT" | jq \
           '. + {k8s_namespace: $k8s_namespace}')
 
 SCOPE_ID=$(echo "$CONTEXT" | jq -r .tags.scope_id)
-RULE_PATH=$(echo "$CONTEXT" | jq -r .link.attributes.path)
+SCOPE_SLUG=$(echo "$CONTEXT" | jq -r .tags.scope)
+
+RULE_PATH=$(echo "$CONTEXT" | jq -r '.link.attributes.path // .parameters.path')
 
 export OUTPUT_DIR="$SERVICE_PATH/output/$SERVICE_NAME-$SERVICE_ID/$ACTION_NAME-$ACTION_ID"
 
@@ -26,4 +31,5 @@ export ACTION_NAME
 export LINK_ID
 export LINK_NAME
 export SCOPE_ID
+export SCOPE_SLUG
 export RULE_PATH

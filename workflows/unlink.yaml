@@ -34,3 +34,8 @@ steps:
     configuration:
       ACTION: apply
       DRY_RUN: false
+  - name: "add_rule_to_service"
+    type: script
+    file: "$SERVICE_PATH/scripts/update_service"
+    configuration:
+      ACTION: remove
