@@ -1,0 +1,67 @@
+#!/bin/bash
+
+SCOPE_NRN=$(echo "$CONTEXT" | jq -r .scope.nrn)
+
+echo "LINK SPECIFICATION ID: $LINK_SPECIFICATION_ID, SCOPE_NRN: $SCOPE_NRN"
+
+LINKS=$(np link list --nrn "$SCOPE_NRN" --format json)
+
+EXPOSER_LINKS=$(echo "$LINKS" | jq -c --arg spec "$LINK_SPECIFICATION_ID" '
+  .results
+  | map(select(.specification_id == $spec))
+')
+
+COUNT=$(echo "$EXPOSER_LINKS" | jq 'length')
+
+if [[ "$COUNT" -eq 0 ]]; then
+  echo "This scope is not public, skipping public ingress synchronization"
+  return
+fi
+
+echo "This is a public scope, starting public ingress synchronization"
+
+ACTIONS=$(np link specification action specification list --linkSpecificationId "$LINK_SPECIFICATION_ID" --format json)
+
+REFRESH_ACTION=$(echo "$ACTIONS" | jq -c '
+  .results
+  | map(select(.slug == "refresh"))
+  | .[0]
+')
+
+REFRESH_ACTION_ID=$(echo "$REFRESH_ACTION" | jq -r .id)
+
+# Iterate over matches
+echo "$EXPOSER_LINKS" | jq -c '.[]' | while read -r link; do
+  # Extract useful values
+  LINK_ID=$(echo "$link" | jq -r '.id')
+
+  ACTION=$(np link action create --linkId "$LINK_ID" --body "{\"name\": \"refresh\", \"parameters\":{}, \"specification_id\": \"$REFRESH_ACTION_ID\"}" --format json)
+  ACTION_ID=$(echo "$ACTION" | jq -r .id)
+
+  echo "Created public ingress synchronization action[id=$ACTION_ID], waiting for its completion"
+
+  MAX_ITERATIONS=20
+  iteration=0
+
+  while true; do
+     ((iteration++))
+      if [ "$iteration" -gt $MAX_ITERATIONS ]; then
+          echo "Error: Maximum number of iterations (${MAX_ITERATIONS}) reached. Could not refresh the exposer."
+          exit 1
+      fi
+
+      ACTION_STATUS=$(np link action read --linkId "$LINK_ID" --id "$ACTION_ID" --format json | jq -r .status)
+
+      echo "Checking public ingress synchronization action[id=$ACTION_ID, status=$ACTION_STATUS]"
+
+      if [[ "$ACTION_STATUS" == "success" ]]; then
+        echo "✅ Public ingress successfully synchronized"
+        break
+      elif [[ "$ACTION_STATUS" == "failed" ]]; then
+        echo "❌ Could not synchronize public ingress, deployment will be rollbacked"
+        exit 1
+      fi
+
+      sleep 5
+  done
+done

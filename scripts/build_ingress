@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+SERVICE_DOMAIN=$(echo "$CONTEXT" | jq -r .parameters.domain)
+
 echo "Creating ingress for service $SERVICE_NAME with domain $SERVICE_DOMAIN"
 
 echo "Creating public ingress..."
