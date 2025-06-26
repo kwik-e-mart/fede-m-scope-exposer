@@ -67,7 +67,8 @@ stop_spinner_success "REPO_PATH found and loaded successfully."
 
 SERVICE_SPEC_PATH="specs/service-spec.json"
 LINK_SPEC_PATH="specs/link-spec.json"
-ACTION_DIR="specs/actions"
+LINK_ACTION_DIR="specs/link-actions"
+SERVICE_ACTION_DIR="specs/service-actions"
 
 gomplate --file "$SERVICE_SPEC_PATH.tpl" --out "$SERVICE_SPEC_PATH"
 
@@ -102,9 +103,9 @@ export LINK_SLUG
 
 # --- Step 4: Create Action Specifications ---
 
-find "$ACTION_DIR" -type f -name "*.tpl" | while read -r TEMPLATE_FILE; do
-    REL_PATH="${TEMPLATE_FILE#$ACTION_DIR/}"
-    OUTPUT_PATH="$ACTION_DIR/${REL_PATH%.tpl}"
+find "$LINK_ACTION_DIR" -type f -name "*.tpl" | while read -r TEMPLATE_FILE; do
+    REL_PATH="${TEMPLATE_FILE#$LINK_ACTION_DIR/}"
+    OUTPUT_PATH="$LINK_ACTION_DIR/${REL_PATH%.tpl}"
 
     gomplate --file "$TEMPLATE_FILE" --out "$OUTPUT_PATH"
 
@@ -114,6 +115,27 @@ find "$ACTION_DIR" -type f -name "*.tpl" | while read -r TEMPLATE_FILE; do
     {
       ACTION_SPEC=$(np link specification action specification create \
         --linkSpecificationId "$LINK_SPECIFICATION_ID" \
+        --body "$ACTION_SPEC_BODY" \
+        --format json)
+      ACTION_SPEC_ID=$(echo "$ACTION_SPEC" | jq -r .id)
+    } || stop_spinner_error "Failed to create action specification: $REL_PATH."
+
+    rm "$OUTPUT_PATH"
+    stop_spinner_success "Action specification created successfully (id=$ACTION_SPEC_ID)."
+done
+
+find "$SERVICE_ACTION_DIR" -type f -name "*.tpl" | while read -r TEMPLATE_FILE; do
+    REL_PATH="${TEMPLATE_FILE#$SERVICE_ACTION_DIR/}"
+    OUTPUT_PATH="$SERVICE_ACTION_DIR/${REL_PATH%.tpl}"
+
+    gomplate --file "$TEMPLATE_FILE" --out "$OUTPUT_PATH"
+
+    ACTION_SPEC_BODY=$(cat "$OUTPUT_PATH")
+
+    start_spinner "Registering action specification: ${REL_PATH%.json.tpl}."
+    {
+      ACTION_SPEC=$(np service specification action specification create \
+        --serviceSpecificationId "$SERVICE_SPECIFICATION_ID" \
         --body "$ACTION_SPEC_BODY" \
         --format json)
       ACTION_SPEC_ID=$(echo "$ACTION_SPEC" | jq -r .id)

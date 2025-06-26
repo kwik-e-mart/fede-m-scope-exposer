@@ -9,6 +9,8 @@ metadata:
     service_id: {{ .service.id }}
   annotations:
     kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/group.name: {{ .alb_name }}
+    alb.ingress.kubernetes.io/load-balancer-name: {{ .alb_name }}
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/actions.response-404: >-

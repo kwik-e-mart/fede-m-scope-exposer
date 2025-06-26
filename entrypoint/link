@@ -18,8 +18,9 @@ esac
 
 WORKFLOW_PATH="$SERVICE_PATH/workflows/$ACTION_TO_EXECUTE.yaml"
 OVERRIDES_WORKFLOW_PATH="$OVERRIDES_PATH/workflows/$ACTION_TO_EXECUTE.yaml"
+VALUES_PATH="$SERVICE_PATH/values.yaml"
 
-CMD="np service workflow exec --workflow $WORKFLOW_PATH"
+CMD="np service workflow exec --workflow $WORKFLOW_PATH --values $VALUES_PATH"
 
 if [[ -f "$OVERRIDES_WORKFLOW_PATH" ]]; then
   CMD="$CMD --overrides $OVERRIDES_WORKFLOW_PATH"
