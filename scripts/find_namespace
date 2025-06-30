@@ -1,0 +1,21 @@
+#!/bin/bash
+
+NRN=$(echo "$CONTEXT" | jq -r .entity_nrn)
+
+DIMENSIONS=$(echo "$CONTEXT" | jq .service.dimensions)
+
+CONTAINER_ORCHESTRATION=$(np category list --slug container-orchestration --format json | jq -r ".results[0].id")
+
+PROVIDER_SPECS=$(np provider specification list --nrn "$NRN" --category "$CONTAINER_ORCHESTRATION" --format json | jq -r '[.results[].id] | join(",")')
+
+DIMENSION_FILTER=$(echo "$DIMENSIONS" | jq -r 'to_entries | map("\(.key):\(.value)") | join(",")')
+
+if [ -z "$DIMENSION_FILTER" ] || [ "$DIMENSION_FILTER" = "" ]; then
+  PROVIDER=$(np provider list --nrn "$NRN" --specification_id "$PROVIDER_SPECS" --show_ascendants --format json | jq -r ".results[0].id")
+else
+  PROVIDER=$(np provider list --nrn "$NRN" --specification_id "$PROVIDER_SPECS" --show_ascendants --dimensions "$DIMENSION_FILTER" --format json | jq -r ".results[0].id")
+fi
+
+K8S_NAMESPACE=$(np provider read --id "$PROVIDER" --format json | jq -r .attributes.cluster.namespace)
+
+export K8S_NAMESPACE

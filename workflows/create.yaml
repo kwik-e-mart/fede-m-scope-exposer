@@ -19,6 +19,9 @@ steps:
         type: environment
       - name: RULE_PATH
         type: environment
+  - name: "find k8s namespace"
+    type: script
+    file: "$SERVICE_PATH/scripts/find_namespace"
   - name: "build template"
     type: script
     file: "$SERVICE_PATH/scripts/build_ingress"
