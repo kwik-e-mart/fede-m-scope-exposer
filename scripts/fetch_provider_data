@@ -24,8 +24,5 @@ ALB_NAME=$(echo "$PROVIDER_DATA" | jq -r --arg default "k8s-nullplatform-interne
   .attributes.balancer.public_name // $default
 ')
 
-echo "ALB: $ALB_NAME"
-echo "Provider: $PROVIDER_DATA"
-
 export K8S_NAMESPACE
 export ALB_NAME

@@ -1,4 +1,12 @@
 steps:
+  - name: "find k8s namespace"
+    type: script
+    file: "$SERVICE_PATH/scripts/fetch_provider_data"
+    output:
+      - name: K8S_NAMESPACE
+        type: environment
+      - name: ALB_NAME
+        type: environment
   - name: "build context"
     type: script
     file: "$SERVICE_PATH/scripts/build_context"
