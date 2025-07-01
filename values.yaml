@@ -1,3 +1,2 @@
 configuration:
-  ALB_NAME: aaaa
   K8S_NAMESPACE: nullplatform

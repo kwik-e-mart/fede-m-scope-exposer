@@ -16,6 +16,16 @@ else
   PROVIDER=$(np provider list --nrn "$NRN" --specification_id "$PROVIDER_SPECS" --show_ascendants --dimensions "$DIMENSION_FILTER" --format json | jq -r ".results[0].id")
 fi
 
-K8S_NAMESPACE=$(np provider read --id "$PROVIDER" --format json | jq -r .attributes.cluster.namespace)
+PROVIDER_DATA=$(np provider read --id "$PROVIDER" --format json)
+
+K8S_NAMESPACE=$(echo "$PROVIDER_DATA" | jq -r .attributes.cluster.namespace)
+
+ALB_NAME=$(echo "$PROVIDER_DATA" | jq -r --arg default "k8s-nullplatform-internet-facing" '
+  .attributes.balancer.public_name // $default
+')
+
+echo "ALB: $ALB_NAME"
+echo "Provider: $PROVIDER_DATA"
 
 export K8S_NAMESPACE
+export ALB_NAME
