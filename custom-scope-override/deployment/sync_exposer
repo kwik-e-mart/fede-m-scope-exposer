@@ -4,7 +4,7 @@ SCOPE_NRN=$(echo "$CONTEXT" | jq -r .scope.nrn)
 
 echo "LINK SPECIFICATION ID: $LINK_SPECIFICATION_ID, SCOPE_NRN: $SCOPE_NRN"
 
-LINKS=$(np link list --nrn "$SCOPE_NRN" --format json)
+LINKS=$(np link list --nrn "$SCOPE_NRN" --status active --format json)
 
 EXPOSER_LINKS=$(echo "$LINKS" | jq -c --arg spec "$LINK_SPECIFICATION_ID" '
   .results
@@ -36,6 +36,7 @@ echo "$EXPOSER_LINKS" | jq -c '.[]' | while read -r link; do
   LINK_ID=$(echo "$link" | jq -r '.id')
 
   ACTION=$(np link action create --linkId "$LINK_ID" --body "{\"name\": \"refresh\", \"parameters\":{}, \"specification_id\": \"$REFRESH_ACTION_ID\"}" --format json)
+
   ACTION_ID=$(echo "$ACTION" | jq -r .id)
 
   echo "Created public ingress synchronization action[id=$ACTION_ID], waiting for its completion"
