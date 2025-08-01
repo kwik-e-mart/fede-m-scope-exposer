@@ -1,0 +1,40 @@
+#!/bin/bash
+
+ENVIRONMENT=$(echo "$CONTEXT" | jq -r .scope.dimensions.environment)
+SERVICE=$(echo "$CONTEXT" | jq -r -r '.application.slug + "-" + .scope.slug')
+VERSION=$(echo "$CONTEXT" | jq -r .release.semver)
+TEAM="backend"
+JAVA_LIB_VERSION="v1.50.0"
+
+DATADOG_LABELS=$(jq -n --arg env "$ENVIRONMENT" --arg service "$SERVICE" --arg version "$VERSION" '{
+  "tags.datadoghq.com/env": $env,
+  "tags.datadoghq.com/service": $service,
+  "tags.datadoghq.com/version": $version,
+  "admission.datadoghq.com/enabled": "true"
+}')
+
+DATADOG_ANNOTATIONS=$(jq -n --arg team "$TEAM" --arg java_lib_version "$JAVA_LIB_VERSION" '{
+  "admission.datadoghq.com/config.mode": "socket",
+  "ad.datadoghq.com/tags": ("{\"team\": \"" + $team + "\"}")
+}')
+
+if [[ -n "$JAVA_LIB_VERSION" ]]; then
+  DATADOG_ANNOTATIONS=$(echo "$DATADOG_ANNOTATIONS" | jq --arg java_lib_version "$JAVA_LIB_VERSION" '. + {
+    "admission.datadoghq.com/java-lib.version": $java_lib_version
+  }')
+fi
+
+MODIFIERS=$(echo "$CONTEXT" | jq .k8s_modifiers)
+
+MODIFIERS=$(echo "$MODIFIERS" | jq --argjson datadog_annotations "$DATADOG_ANNOTATIONS" --argjson datadog_labels "$DATADOG_LABELS" '
+  .deployment.annotations = ((.deployment.annotations // {}) + $datadog_annotations) |
+  .deployment.labels = ((.deployment.labels // {}) + $datadog_labels)
+')
+
+CONTEXT=$(echo "$CONTEXT" | jq  --argjson modifiers "$MODIFIERS"  '.k8s_modifiers = $modifiers')
+
+echo "Adding datadog annotations:"
+echo "$DATADOG_ANNOTATIONS" | jq .
+
+echo "Adding datadog labels:"
+echo "$DATADOG_LABELS" | jq .

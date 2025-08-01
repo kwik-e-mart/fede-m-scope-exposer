@@ -1,4 +1,12 @@
 steps:
+  - name: build_tolerations
+    type: script
+    file: "$OVERRIDES_PATH/deployment/build_tolerations"
+    after: build context
+  - name: build_datadog_annotations
+    type: script
+    file: "$OVERRIDES_PATH/deployment/build_datadog_annotations"
+    after: build_tolerations
   - name: sync_exposer
     type: script
     file: "$OVERRIDES_PATH/deployment/sync_exposer"
