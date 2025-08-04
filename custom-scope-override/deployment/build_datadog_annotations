@@ -1,10 +1,45 @@
 #!/bin/bash
 
 ENVIRONMENT=$(echo "$CONTEXT" | jq -r .scope.dimensions.environment)
-SERVICE=$(echo "$CONTEXT" | jq -r -r '.application.slug + "-" + .scope.slug')
+SERVICE=$(basename "$(echo "$CONTEXT" | jq -r '.application.repository_url')-kubernetes")
 VERSION=$(echo "$CONTEXT" | jq -r .release.semver)
-TEAM="backend"
-JAVA_LIB_VERSION="v1.50.0"
+TEAM=$(echo "$CONTEXT" | jq -r .application.metadata.scaffolding.project_details.tribe_name)
+
+ARCHITECTURE=$(echo "$CONTEXT" | jq -r .application.metadata.scaffolding.architecture_type)
+
+#admission.datadoghq.com/java-lib.version: "v1.50.0"
+#admission.datadoghq.com/python-lib.version: "v3.9.3"
+#admission.datadoghq.com/js-lib.version:  "v5.56.0"
+#admission.datadoghq.com/ruby-lib.version: "v2.17.0"
+#admission.datadoghq.com/dotnet-lib.version: "v3.19.0"
+
+case "$ARCHITECTURE" in
+  "react-"* | "js-"*)
+    TECHNOLOGY=nodejs
+    DATADOG_LIB_VERSION=v5.56.0
+    ;;
+  "spring-boot-"* | "java-"*)
+      TECHNOLOGY=java
+      DATADOG_LIB_VERSION=v1.5.0
+      ;;
+  "python-"*)
+      TECHNOLOGY=python
+      DATADOG_LIB_VERSION=v3.9.3
+      ;;
+  "ruby-"*)
+      TECHNOLOGY=ruby
+      DATADOG_LIB_VERSION=v2.17.0
+      ;;
+  "dotnet-"*)
+      TECHNOLOGY=dotnet
+      DATADOG_LIB_VERSION=v3.19.0
+      ;;
+  *)
+    TECHNOLOGY=
+    DATADOG_LIB_VERSION=
+    echo "There is no known datadog lib for architecture: $ARCHITECTURE, the technology-specific annotation will be skipped."
+    ;;
+esac
 
 DATADOG_LABELS=$(jq -n --arg env "$ENVIRONMENT" --arg service "$SERVICE" --arg version "$VERSION" '{
   "tags.datadoghq.com/env": $env,
@@ -18,10 +53,10 @@ DATADOG_ANNOTATIONS=$(jq -n --arg team "$TEAM" --arg java_lib_version "$JAVA_LIB
   "ad.datadoghq.com/tags": ("{\"team\": \"" + $team + "\"}")
 }')
 
-if [[ -n "$JAVA_LIB_VERSION" ]]; then
-  DATADOG_ANNOTATIONS=$(echo "$DATADOG_ANNOTATIONS" | jq --arg java_lib_version "$JAVA_LIB_VERSION" '. + {
-    "admission.datadoghq.com/java-lib.version": $java_lib_version
-  }')
+if [[ -n "$TECHNOLOGY" ]]; then
+  DATADOG_ANNOTATIONS=$(echo "$DATADOG_ANNOTATIONS" | jq --arg technology "$TECHNOLOGY" --arg lib_version "$DATADOG_LIB_VERSION" '
+    . + { ("admission.datadoghq.com/" + $technology + "-lib.version"): $lib_version }
+  ')
 fi
 
 MODIFIERS=$(echo "$CONTEXT" | jq .k8s_modifiers)
