@@ -4,7 +4,7 @@ NRN=$(echo "$CONTEXT" | jq -r .entity_nrn)
 
 DIMENSIONS=$(echo "$CONTEXT" | jq .service.dimensions)
 
-CONTAINER_ORCHESTRATION=$(np category list --slug container-orchestration --format json | jq -r ".results[0].id")
+CONTAINER_ORCHESTRATION=$(np provider category list --slug container-orchestration --format json | jq -r ".results[0].id")
 
 PROVIDER_SPECS=$(np provider specification list --nrn "$NRN" --category "$CONTAINER_ORCHESTRATION" --format json | jq -r '[.results[].id] | join(",")')
 
