@@ -4,19 +4,13 @@ NRN=$(echo "$CONTEXT" | jq -r .entity_nrn)
 
 DIMENSIONS=$(echo "$CONTEXT" | jq .service.dimensions)
 
-CONTAINER_ORCHESTRATION=$(np provider category list --slug container-orchestration --format json | jq -r ".results[0].id")
-
-PROVIDER_SPECS=$(np provider specification list --nrn "$NRN" --category "$CONTAINER_ORCHESTRATION" --format json | jq -r '[.results[].id] | join(",")')
-
 DIMENSION_FILTER=$(echo "$DIMENSIONS" | jq -r 'to_entries | map("\(.key):\(.value)") | join(",")')
 
 if [ -z "$DIMENSION_FILTER" ] || [ "$DIMENSION_FILTER" = "" ]; then
-  PROVIDER=$(np provider list --nrn "$NRN" --specification_id "$PROVIDER_SPECS" --show_ascendants --format json | jq -r ".results[0].id")
+  PROVIDER_DATA=$(np provider list --categories container-orchestration --nrn "$NRN" --format json | jq -r ".results[0]")
 else
-  PROVIDER=$(np provider list --nrn "$NRN" --specification_id "$PROVIDER_SPECS" --show_ascendants --dimensions "$DIMENSION_FILTER" --format json | jq -r ".results[0].id")
+  PROVIDER_DATA=$(np provider list --categories container-orchestration --nrn "$NRN" --dimensions "$DIMENSION_FILTER" --format json | jq -r ".results[0]")
 fi
-
-PROVIDER_DATA=$(np provider read --id "$PROVIDER" --format json)
 
 K8S_NAMESPACE=$(echo "$PROVIDER_DATA" | jq -r .attributes.cluster.namespace)
 

@@ -4,7 +4,7 @@ SCOPE_NRN=$(echo "$CONTEXT" | jq -r .scope.nrn)
 
 echo "LINK SPECIFICATION ID: $LINK_SPECIFICATION_ID, SCOPE_NRN: $SCOPE_NRN"
 
-LINKS=$(np link list --nrn "$SCOPE_NRN" --format json)
+LINKS=$(np link list --nrn "$SCOPE_NRN" --format json --status active)
 
 EXPOSER_LINKS=$(echo "$LINKS" | jq -c --arg spec "$LINK_SPECIFICATION_ID" '
   .results
