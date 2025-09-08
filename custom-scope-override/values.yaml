@@ -1,2 +1,9 @@
 configuration:
-  LINK_SPECIFICATION_ID: b215648d-e7c3-4136-96d7-8fd39b824e61
+  LINK_SPECIFICATION_ID: b229c8c8-101a-4dab-b0b0-7aa2e23d1bc1
+  IAM:
+    ENABLED: true
+    PREFIX: nullplatform-scopes
+  IMAGE_PULL_SECRETS:
+    ENABLED: true
+    SECRETS:
+      - regcred
