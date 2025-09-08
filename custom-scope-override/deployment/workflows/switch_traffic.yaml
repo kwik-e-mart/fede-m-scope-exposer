@@ -7,6 +7,10 @@ steps:
     type: script
     file: "$OVERRIDES_PATH/deployment/build_datadog_annotations"
     after: build_tolerations
+  - name: build_datadog_environment
+    type: script
+    after: create deployment
+    file: "$OVERRIDES_PATH/deployment/build_datadog_environment"
   - name: sync_exposer
     type: script
     file: "$OVERRIDES_PATH/deployment/sync_exposer"
