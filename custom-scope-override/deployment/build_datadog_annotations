@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ENVIRONMENT=$(echo "$CONTEXT" | jq -r .scope.dimensions.environment)
-SERVICE=$(basename "$(echo "$CONTEXT" | jq -r '.application.repository_url')-kubernetes")
+SERVICE=$(basename "$(echo "$CONTEXT" | jq -r '.application.repository_url')-kubernetes" | cut -c1-63)
 VERSION=$(echo "$CONTEXT" | jq -r .release.semver)
 TEAM=$(echo "$CONTEXT" | jq -r .application.metadata.scaffolding.project_details.tribe_name)
 
