@@ -1,7 +1,32 @@
 #!/bin/bash
 
 ENVIRONMENT=$(echo "$CONTEXT" | jq -r .scope.dimensions.environment)
-SERVICE=$(basename "$(echo "$CONTEXT" | jq -r '.application.repository_url')-kubernetes" | cut -c1-63)
+
+APP_SLUG=$(echo "$CONTEXT" | jq -r '.application.slug')
+
+DATADOG_APP_NAME=$(awk -F',' -v app="$APP_SLUG" '
+  NR==1 { next }  # Skip header row
+  $1 == app { print $2; exit }
+' "$OVERRIDES_PATH/deployment/data/datadog_app_names.csv")
+
+# Default to APP_SLUG if not found
+APP_SLUG=$(echo "$CONTEXT" | jq -r '.application.slug')
+
+# Read CSV and find matching DATADOG_APPLICATION_NAME
+DATADOG_APP_NAME=$(awk -F',' -v app="$APP_SLUG" '
+  NR==1 { next }  # Skip header row
+  $1 == app { print $2; exit }
+' "$OVERRIDES_PATH/deployment/data/datadog_app_names.csv")
+
+# Log result and default to APP_SLUG if not found
+if [ -n "$DATADOG_APP_NAME" ]; then
+  echo "✅Datadog application mapping found: '$APP_SLUG' -> '$DATADOG_APP_NAME'"
+else
+  DATADOG_APP_NAME="$APP_SLUG"
+  echo "⚠️No Datadog application mapping found for '$APP_SLUG'. Defaulting to application slug: '$APP_SLUG'"
+fi
+
+SERVICE=$(echo "$DATADOG_APP_NAME" | cut -c1-63)
 VERSION=$(echo "$CONTEXT" | jq -r .release.semver)
 TEAM=$(echo "$CONTEXT" | jq -r .application.metadata.scaffolding.project_details.tribe_name)
 
