@@ -1,0 +1,76 @@
+#!/bin/bash
+
+APPLICATION_SLUG=$(echo "$CONTEXT" | jq -r .application.slug)
+SCOPE_ENVIRONMENT=$(echo "$CONTEXT" | jq -r .scope.dimensions.environment)
+
+IAM=${IAM-"{}"}
+IAM_ENABLED=$(echo "$IAM" | jq -r .ENABLED)
+IAM_PREFIX=$(echo "$IAM" | jq -r .PREFIX)
+
+if [[ "$IAM_ENABLED" == "false" || "$IAM_ENABLED" == "null" ]]; then
+  echo "No IAM role configuration. Skipping role setup"
+  return
+fi
+
+MAPPING_FILE="$OVERRIDES_PATH/scope/iam/iam_mappings.csv"
+
+# Use awk to find and print the matching value
+SOURCE_ROLE=$(awk -F',' -v app="$APPLICATION_SLUG" -v env="rol_${SCOPE_ENVIRONMENT}" '
+NR==1 {
+    for (i=1; i<=NF; i++) {
+        if ($i == env) {
+            col_index = i
+            break
+        }
+    }
+    if (col_index == 0) exit
+    next
+}
+$1 == app {
+    print $col_index
+    exit
+}
+' "$MAPPING_FILE")
+
+if [ -z "$SOURCE_ROLE" ]; then
+  echo "⚠️ No role mapping found in the mapping file: $MAPPING_FILE"
+  return
+fi
+
+echo "✅  Found application mapping. Cloning role $SOURCE_ROLE"
+
+echo "🚀 Downloading source role $SOURCE_ROLE"
+
+BOUNDARY_ARN="$(aws iam get-role --role-name "$SOURCE_ROLE" | jq -r '.Role.PermissionsBoundary.PermissionsBoundaryArn // empty')"
+
+echo "🚀 Downloading inline policies"
+INLINE_POLICIES=$(aws iam list-role-policies --role-name "$SOURCE_ROLE" --query 'PolicyNames[]' --output text | \
+xargs -I {} aws iam get-role-policy --role-name "$SOURCE_ROLE" --policy-name {} --output json | \
+  jq -s 'map({TYPE: "inline", VALUE: .PolicyDocument | tostring})')
+
+echo "🚀 Downloading managed policies"
+ATTACHED_POLICIES=$(aws iam list-attached-role-policies --role-name "$SOURCE_ROLE" --output json | \
+ jq '[.AttachedPolicies[] | {"TYPE": "arn", "VALUE": .PolicyArn}]')
+
+POLICIES=$(jq -n --argjson inline "$INLINE_POLICIES" --argjson attached "$ATTACHED_POLICIES" \
+ '$inline + $attached')
+
+IAM="$(
+  jq -c -n \
+    --arg PREFIX "$IAM_PREFIX" \
+    --arg BOUNDARY_ARN "$BOUNDARY_ARN" \
+    --argjson POLICIES "$POLICIES" \
+    --arg ENABLED "$IAM_ENABLED" '
+{
+  ENABLED: $ENABLED,
+  PREFIX: $PREFIX,
+  ROLE: {
+    POLICIES: $POLICIES,
+    BOUNDARY_ARN: (if $BOUNDARY_ARN=="" then null else $BOUNDARY_ARN end)
+  }
+}')"
+
+echo "✅ Generated IAM role configuration based on $SOURCE_ROLE"
+echo "$IAM" | jq .
+
+export IAM
