@@ -3,6 +3,12 @@
 for deployment_file in "$OUTPUT_DIR"/deployment-*.yaml; do
     if [ -f "$deployment_file" ]; then
         echo "Processing: $deployment_file"
-        yq eval -i '.spec.template.spec.containers[].env += [{"name": "DD_AGENT_HOST", "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": "status.hostIP"}}}]' "$deployment_file"
+        yq eval -i '
+          if .spec.jobTemplate.spec.template.spec.containers then
+            .spec.jobTemplate.spec.template.spec.containers[].env += [{"name": "DD_AGENT_HOST", "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": "status.hostIP"}}}]
+          else
+            .spec.template.spec.containers[].env += [{"name": "DD_AGENT_HOST", "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": "status.hostIP"}}}]
+          end
+        ' "$deployment_file"
     fi
 done
