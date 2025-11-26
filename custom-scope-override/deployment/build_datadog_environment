@@ -2,7 +2,14 @@
 
 for deployment_file in "$OUTPUT_DIR"/deployment-*.yaml; do
     if [ -f "$deployment_file" ]; then
-        echo "Processing: $deployment_file"
-        yq eval -i '(.spec.jobTemplate.spec.template.spec.containers // .spec.template.spec.containers)[].env += [{"name": "DD_AGENT_HOST", "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": "status.hostIP"}}}]' "$deployment_file"
+        kind=$(yq eval '.kind' "$deployment_file")
+
+        echo "Processing: $deployment_file of kind $kind"
+
+        if [ "$kind" = "CronJob" ]; then
+            yq eval -i '.spec.jobTemplate.spec.template.spec.containers[].env += [{"name": "DD_AGENT_HOST", "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": "status.hostIP"}}}]' "$deployment_file"
+        else
+            yq eval -i '.spec.template.spec.containers[].env += [{"name": "DD_AGENT_HOST", "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": "status.hostIP"}}}]' "$deployment_file"
+        fi
     fi
 done
