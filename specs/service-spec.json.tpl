@@ -4,7 +4,8 @@
     "schema": {
       "properties": {
         "domain": {
-          "type": "string"
+          "type": "string",
+          "editableOn": []
         },
         "rules": {
           "items": {
