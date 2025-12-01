@@ -15,7 +15,10 @@ CONFIGMAP_NAMESPACE="default"
 
 echo "Checking CloudWatch Logs requirements..."
 
-if [[ "$HAS_APP_NAME" != "not_set" && "$HAS_SERVICE_NAME" != "not_set" && "$HAS_ROLE" != "not_set" && "$ENVIRONMENT" == "prod" && "$CLUSTER_NAME" == "spin-cluster-prod" ]]; then
+if [[ "$HAS_APP_NAME" != "not_set" && 
+      "$HAS_SERVICE_NAME" != "not_set" && 
+      # "$HAS_ROLE" != "not_set" && "$ENVIRONMENT" == "prd" && 
+      "$CLUSTER_NAME" == "spin-cluster-prod" ]]; then
     echo "Setting app Cloudwatch logs... Looking for config map $CONFIGMAP_NAME in namespace $CONFIGMAP_NAMESPACE"
 
     # Check ConfigMap existence
