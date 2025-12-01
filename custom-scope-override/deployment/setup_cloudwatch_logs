@@ -3,16 +3,19 @@
 ENVIRONMENT=$(echo "$CONTEXT" | jq -r .scope.dimensions.environment)
 
 # Check parameters (handle null results safely)
-HAS_APP_NAME=$(echo "$CONTEXT" | jq -r 'if [(.parameters.results // [])[] | select(.name == "APP_NAME")] | length > 0 then "set" else "not_set" end')
-HAS_SERVICE_NAME=$(echo "$CONTEXT" | jq -r 'if [(.parameters.results // [])[] | select(.name == "SERVICE_NAME")] | length > 0 then "set" else "not_set" end')
-HAS_ROLE=$(echo "$CONTEXT" | jq -r 'if [(.parameters.results // [])[] | select(.name == "AWS_ROLE_ARN")] | length > 0 then "set" else "not_set" end')
+HAS_APP_NAME=$(echo "$CONTEXT" | jq -r '(.parameters.results // [])[] | select(.name == "APP_NAME") | .values[0].value // "not_set"' | head -n 1)
+HAS_APP_NAME=${HAS_APP_NAME:-not_set}
+HAS_SERVICE_NAME=$(echo "$CONTEXT" | jq -r '(.parameters.results // [])[] | select(.name == "SERVICE_NAME") | .values[0].value // "not_set"' | head -n 1)
+HAS_SERVICE_NAME=${HAS_SERVICE_NAME:-not_set}
+HAS_ROLE=$(echo "$CONTEXT" | jq -r '(.parameters.results // [])[] | select(.name == "AWS_ROLE_ARN") | .values[0].value // "not_set"' | head -n 1)
+HAS_ROLE=${HAS_ROLE:-not_set}
 
 CONFIGMAP_NAME="fluent-bit-config"
 CONFIGMAP_NAMESPACE="default"
 
 echo "Checking CloudWatch Logs requirements..."
 
-if [[ "$HAS_APP_NAME" -gt 0 && "$HAS_SERVICE_NAME" -gt 0 && "$HAS_ROLE" -gt 0 && "$ENVIRONMENT" == "prod" && "$CLUSTER_NAME" == "spin-cluster-prod" ]]; then
+if [[ "$HAS_APP_NAME" != "not_set" && "$HAS_SERVICE_NAME" != "not_set" && "$HAS_ROLE" != "not_set" && "$ENVIRONMENT" == "prod" && "$CLUSTER_NAME" == "spin-cluster-prod" ]]; then
     echo "Setting app Cloudwatch logs... Looking for config map $CONFIGMAP_NAME in namespace $CONFIGMAP_NAMESPACE"
 
     # Check ConfigMap existence
