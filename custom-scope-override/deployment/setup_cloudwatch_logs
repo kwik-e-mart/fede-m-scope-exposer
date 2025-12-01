@@ -34,11 +34,11 @@ if [[ "$HAS_APP_NAME" != "not_set" &&
             echo "Processing: $deployment_file of kind $kind"
 
             if [ "$kind" = "CronJob" ]; then
-                    # Add envFrom to fluent-bit container in CronJob
-                yq eval -i "(.spec.jobTemplate.spec.template.spec.containers[] | select(.name == \"*fluent-bit*\").envFrom) += [{\"configMapRef\": {\"name\": \"$CONFIGMAP_NAME\"}}]" "$deployment_file"
+                # Add envFrom to fluent-bit container in CronJob
+                yq eval -i ".spec.jobTemplate.spec.template.spec.containers[].envFrom += [{\"configMapRef\": {\"name\": \"$CONFIGMAP_NAME\"}}]" "$deployment_file"
             else
                 # Add envFrom to fluent-bit container in Deployment/others
-                yq eval -i "(.spec.template.spec.containers[] | select(.name == \"*fluent-bit*\").envFrom) += [{\"configMapRef\": {\"name\": \"$CONFIGMAP_NAME\"}}]" "$deployment_file"
+                yq eval -i ".spec.template.spec.containers[].envFrom += [{\"configMapRef\": {\"name\": \"$CONFIGMAP_NAME\"}}]" "$deployment_file"
             fi
             
             echo "Successfully configured cloudwatch logs for $deployment_file"
