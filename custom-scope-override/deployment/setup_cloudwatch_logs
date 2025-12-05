@@ -69,7 +69,12 @@ if [[ "$HAS_APP_NAME" != "not_set" &&
     {"name": "APP_NAME", "value": "$HAS_APP_NAME"},
     {"name": "CLUSTER_NAME", "value": "$HAS_CLUSTER_NAME"},
     {"name": "AWS_STS_REGIONAL_ENDPOINTS", "value": "regional"},
-    {"name": "DD_INTERNAL_POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}}
+    {"name": "DD_INTERNAL_POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}},
+    {"name": "AWS_REGION", "valueFrom": {"configMapKeyRef": {"key": "logs.region", "name": "fluent-bit-cluster-info"}}},
+    {"name": "HTTP_SERVER", "valueFrom": {"configMapKeyRef": {"key": "http.server", "name": "fluent-bit-cluster-info"}}},
+    {"name": "HTTP_PORT", "valueFrom": {"configMapKeyRef": {"key": "http.port", "name": "fluent-bit-cluster-info"}}},
+    {"name": "READ_FROM_HEAD", "valueFrom": {"configMapKeyRef": {"key": "read.head", "name": "fluent-bit-cluster-info"}}},
+    {"name": "READ_FROM_TAIL", "valueFrom": {"configMapKeyRef": {"key": "read.tail", "name": "fluent-bit-cluster-info"}}}
   ],
   "resources": {
     "limits": {"cpu": "200m", "memory": "200Mi"},
