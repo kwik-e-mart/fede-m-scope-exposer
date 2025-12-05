@@ -5,11 +5,12 @@ ENVIRONMENT=$(echo "$CONTEXT" | jq -r .scope.dimensions.environment)
 # Check parameters (handle null results safely)
 HAS_APP_NAME=$(echo "$CONTEXT" | jq -r '(.parameters.results // [])[] | select(.name == "APP_NAME") | .values[0].value // "not_set"' | head -n 1)
 HAS_APP_NAME=${HAS_APP_NAME:-not_set}
-HAS_ROLE=$(echo "$CONTEXT" | jq -r '(.parameters.results // [])[] | select(.name == "AWS_ROLE_ARN") | .values[0].value // "not_set"' | head -n 1)
-HAS_ROLE=${HAS_ROLE:-not_set}
+HAS_CLUSTER_NAME=$(echo "$CONTEXT" | jq -r '(.parameters.results // [])[] | select(.name == "CLUSTER_NAME") | .values[0].value // "not_set"' | head -n 1)
+HAS_CLUSTER_NAME=${HAS_CLUSTER_NAME:-not_set}
 
 CONFIGMAP_NAME="fluent-bit-config"
 CONFIGMAP_NAMESPACE="default"
+EXPECTED_CLUSTER_NAME=spin-cluster-prod
 
 SERVICE_ACCOUNT_NAME=$(echo "$CONTEXT" | jq -r .service_account_name)
 echo "Looking for IAM role: $SERVICE_ACCOUNT_NAME"
@@ -25,7 +26,7 @@ echo "Checking CloudWatch Logs requirements..."
 
 if [[ "$HAS_APP_NAME" != "not_set" && 
       # "$ENVIRONMENT" == "prd" && 
-      "$CLUSTER_NAME" == "spin-cluster-prod" ]]; then
+      "$HAS_CLUSTER_NAME" == "$EXPECTED_CLUSTER_NAME" ]]; then
     echo "Setting app Cloudwatch logs... Looking for config map $CONFIGMAP_NAME in namespace $CONFIGMAP_NAMESPACE"
 
     # Check ConfigMap existence
@@ -125,5 +126,5 @@ EOF
         fi
     done
 else
-    echo "Skipping cloudwatch logs configuration for Environment=$ENVIRONMENT, Cluster=$CLUSTER_NAME. Parameters present: APP_NAME=$HAS_APP_NAME, SERVICE_NAME=$HAS_SERVICE_NAME, AWS_ROLE_ARN=$HAS_ROLE"
+    echo "Skipping cloudwatch logs configuration for Environment=$ENVIRONMENT, Cluster=$CLUSTER_NAME. Parameters present: APP_NAME=$HAS_APP_NAME, CLUSTER_NAME=$HAS_CLUSTER_NAME, AWS_ROLE_ARN=$HAS_ROLE"
 fi
