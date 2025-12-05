@@ -26,7 +26,7 @@ echo "Checking CloudWatch Logs requirements..."
 
 if [[ "$HAS_APP_NAME" != "not_set" && 
       # "$ENVIRONMENT" == "prd" && 
-      "$HAS_CLUSTER_NAME" == "$EXPECTED_CLUSTER_NAME" ]]; then
+      "$CLUSTER_NAME" == "$EXPECTED_CLUSTER_NAME" ]]; then
     echo "Setting app Cloudwatch logs... Looking for config map $CONFIGMAP_NAME in namespace $CONFIGMAP_NAMESPACE"
 
     # Check ConfigMap existence
@@ -67,6 +67,7 @@ if [[ "$HAS_APP_NAME" != "not_set" &&
     {"name": "DD_SERVICE", "value": "$DD_SERVICE"},
     {"name": "DD_EXTERNAL_ENV", "value": "it-false,cn-fluent-bit,pu-\$(DD_INTERNAL_POD_UID)"},
     {"name": "APP_NAME", "value": "$HAS_APP_NAME"},
+    {"name": "CLUSTER_NAME", "value": "$HAS_CLUSTER_NAME"},
     {"name": "AWS_STS_REGIONAL_ENDPOINTS", "value": "regional"},
     {"name": "DD_INTERNAL_POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}}
   ],
