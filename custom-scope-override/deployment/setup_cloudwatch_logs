@@ -2,11 +2,8 @@
 
 ENVIRONMENT=$(echo "$CONTEXT" | jq -r .scope.dimensions.environment)
 
-# Check parameters (handle null results safely)
 HAS_APP_NAME=$(echo "$CONTEXT" | jq -r '(.parameters.results // [])[] | select(.name == "APP_NAME") | .values[0].value // "not_set"' | head -n 1)
 HAS_APP_NAME=${HAS_APP_NAME:-not_set}
-HAS_CLUSTER_NAME=$(echo "$CONTEXT" | jq -r '(.parameters.results // [])[] | select(.name == "CLUSTER_NAME") | .values[0].value // "not_set"' | head -n 1)
-HAS_CLUSTER_NAME=${HAS_CLUSTER_NAME:-not_set}
 
 CONFIGMAP_NAME="fluent-bit-config"
 CONFIGMAP_NAMESPACE="default"
@@ -24,19 +21,17 @@ ROLE_ARN=$(aws iam get-role --role-name "$SERVICE_ACCOUNT_NAME" --query 'Role.Ar
 
 echo "Checking CloudWatch Logs requirements..."
 
-if [[ "$HAS_APP_NAME" != "not_set" && 
-      # "$ENVIRONMENT" == "prd" && 
+if [[ "$HAS_APP_NAME" != "not_set" &&
+      # "$ENVIRONMENT" == "prd" &&
       "$CLUSTER_NAME" == "$EXPECTED_CLUSTER_NAME" ]]; then
     echo "Setting app Cloudwatch logs... Looking for config map $CONFIGMAP_NAME in namespace $CONFIGMAP_NAMESPACE"
 
-    # Check ConfigMap existence
     if ! kubectl get configmap "$CONFIGMAP_NAME" -n "$CONFIGMAP_NAMESPACE" > /dev/null 2>&1; then
         echo "Error: Required ConfigMap '$CONFIGMAP_NAME' was not found in namespace '$CONFIGMAP_NAMESPACE'. CloudWatch logs configuration cannot proceed."
         exit 1
     fi
     echo "ConfigMap '$CONFIGMAP_NAME' found."
 
-    # Calculate Datadog environment variables
     DD_ENV="$ENVIRONMENT"
     DD_VERSION=$(echo "$CONTEXT" | jq -r .release.semver)
     DD_SERVICE=$(basename "$(echo "$CONTEXT" | jq -r '.application.repository_url')-kubernetes" | cut -c1-63)
@@ -49,13 +44,11 @@ if [[ "$HAS_APP_NAME" != "not_set" &&
     echo "APP_NAME: $HAS_APP_NAME"
     echo "AWS_ROLE_ARN: $ROLE_ARN"
 
-    # Add fluent-bit container to each deployment file
     for deployment_file in "$OUTPUT_DIR"/deployment-*.yaml; do
         if [ -f "$deployment_file" ]; then
             kind=$(yq eval '.kind' "$deployment_file")
             echo "Adding fluent-bit container to: $deployment_file of kind $kind"
 
-            # Define the fluent-bit container spec
             FLUENT_BIT_CONTAINER=$(cat <<EOF
 {
   "name": "fluent-bit",
@@ -67,14 +60,14 @@ if [[ "$HAS_APP_NAME" != "not_set" &&
     {"name": "DD_SERVICE", "value": "$DD_SERVICE"},
     {"name": "DD_EXTERNAL_ENV", "value": "it-false,cn-fluent-bit,pu-\$(DD_INTERNAL_POD_UID)"},
     {"name": "APP_NAME", "value": "$HAS_APP_NAME"},
-    {"name": "CLUSTER_NAME", "value": "$HAS_CLUSTER_NAME"},
     {"name": "AWS_STS_REGIONAL_ENDPOINTS", "value": "regional"},
     {"name": "DD_INTERNAL_POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}},
     {"name": "AWS_REGION", "valueFrom": {"configMapKeyRef": {"key": "logs.region", "name": "fluent-bit-cluster-info"}}},
     {"name": "HTTP_SERVER", "valueFrom": {"configMapKeyRef": {"key": "http.server", "name": "fluent-bit-cluster-info"}}},
     {"name": "HTTP_PORT", "valueFrom": {"configMapKeyRef": {"key": "http.port", "name": "fluent-bit-cluster-info"}}},
     {"name": "READ_FROM_HEAD", "valueFrom": {"configMapKeyRef": {"key": "read.head", "name": "fluent-bit-cluster-info"}}},
-    {"name": "READ_FROM_TAIL", "valueFrom": {"configMapKeyRef": {"key": "read.tail", "name": "fluent-bit-cluster-info"}}}
+    {"name": "READ_FROM_TAIL", "valueFrom": {"configMapKeyRef": {"key": "read.tail", "name": "fluent-bit-cluster-info"}}},
+    {"name": "CLUSTER_NAME", "valueFrom": {"configMapKeyRef": {"key": "cluster.name", "name": "fluent-bit-cluster-info"}}}
   ],
   "resources": {
     "limits": {"cpu": "200m", "memory": "200Mi"},
@@ -91,40 +84,33 @@ EOF
 )
 
             if [ "$kind" = "CronJob" ]; then
-                # Add fluent-bit container to CronJob
                 yq eval -i ".spec.jobTemplate.spec.template.spec.containers += [$FLUENT_BIT_CONTAINER]" "$deployment_file"
-                
-                # Add volumes if they don't exist
+
                 yq eval -i '.spec.jobTemplate.spec.template.spec.volumes += [{"name": "varlog", "emptyDir": {}}]' "$deployment_file"
                 yq eval -i '.spec.jobTemplate.spec.template.spec.volumes += [{"name": "fluent-bit-config", "configMap": {"name": "'"$CONFIGMAP_NAME"'"}}]' "$deployment_file"
             else
-                # Add fluent-bit container to Deployment/others
                 yq eval -i ".spec.template.spec.containers += [$FLUENT_BIT_CONTAINER]" "$deployment_file"
-                
-                # Add volumes if they don't exist
+
                 yq eval -i '.spec.template.spec.volumes += [{"name": "varlog", "emptyDir": {}}]' "$deployment_file"
                 yq eval -i '.spec.template.spec.volumes += [{"name": "fluent-bit-config", "configMap": {"name": "'"$CONFIGMAP_NAME"'"}}]' "$deployment_file"
             fi
-            
+
             echo "Successfully added fluent-bit container to $deployment_file"
         fi
     done
 
-    # Now add ConfigMap reference and AWS_ROLE_ARN to all containers
     for deployment_file in "$OUTPUT_DIR"/deployment-*.yaml; do
         if [ -f "$deployment_file" ]; then
             kind=$(yq eval '.kind' "$deployment_file")
             echo "Processing: $deployment_file of kind $kind"
 
             if [ "$kind" = "CronJob" ]; then
-                # Add envFrom to fluent-bit container in CronJob
                 yq eval -i ".spec.jobTemplate.spec.template.spec.containers[].envFrom += [{\"configMapRef\": {\"name\": \"$CONFIGMAP_NAME\"}}]" "$deployment_file"
-                # Add AWS_ROLE_ARN environment variable
+
                 yq eval -i ".spec.jobTemplate.spec.template.spec.containers[].env += [{\"name\": \"AWS_ROLE_ARN\", \"value\": \"$ROLE_ARN\"}]" "$deployment_file"
             else
-                # Add envFrom to fluent-bit container in Deployment/others
                 yq eval -i ".spec.template.spec.containers[].envFrom += [{\"configMapRef\": {\"name\": \"$CONFIGMAP_NAME\"}}]" "$deployment_file"
-                # Add AWS_ROLE_ARN environment variable
+
                 yq eval -i ".spec.template.spec.containers[].env += [{\"name\": \"AWS_ROLE_ARN\", \"value\": \"$ROLE_ARN\"}]" "$deployment_file"
             fi
             
@@ -132,5 +118,5 @@ EOF
         fi
     done
 else
-    echo "Skipping cloudwatch logs configuration for Environment=$ENVIRONMENT, Cluster=$CLUSTER_NAME. Parameters present: APP_NAME=$HAS_APP_NAME, CLUSTER_NAME=$HAS_CLUSTER_NAME, AWS_ROLE_ARN=$HAS_ROLE"
+    echo "Skipping cloudwatch logs configuration for Environment=$ENVIRONMENT, Cluster=$CLUSTER_NAME. Parameters present: APP_NAME=$HAS_APP_NAME, AWS_ROLE_ARN=$HAS_ROLE"
 fi
