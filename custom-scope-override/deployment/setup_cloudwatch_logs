@@ -60,6 +60,7 @@ if [[ "$HAS_APP_NAME" != "not_set" &&
     {"name": "DD_SERVICE", "value": "$DD_SERVICE"},
     {"name": "DD_EXTERNAL_ENV", "value": "it-false,cn-fluent-bit,pu-\$(DD_INTERNAL_POD_UID)"},
     {"name": "APP_NAME", "value": "$HAS_APP_NAME"},
+    {"name": "AWS_WEB_IDENTITY_TOKEN_FILE", "value": "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"},
     {"name": "AWS_STS_REGIONAL_ENDPOINTS", "value": "regional"},
     {"name": "DD_INTERNAL_POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}},
     {"name": "AWS_REGION", "valueFrom": {"configMapKeyRef": {"key": "logs.region", "name": "fluent-bit-cluster-info"}}},
@@ -77,7 +78,8 @@ if [[ "$HAS_APP_NAME" != "not_set" &&
   "terminationMessagePolicy": "File",
   "volumeMounts": [
     {"mountPath": "/var/log", "name": "varlog", "readOnly": true},
-    {"mountPath": "/fluent-bit/etc/", "name": "fluent-bit-config"}
+    {"mountPath": "/fluent-bit/etc/", "name": "fluent-bit-config"},
+    {"mountPath": "/var/run/secrets/eks.amazonaws.com/serviceaccount", "name": "aws-token", "readOnly": true}
   ]
 }
 EOF
@@ -88,11 +90,13 @@ EOF
 
                 yq eval -i '.spec.jobTemplate.spec.template.spec.volumes += [{"name": "varlog", "hostPath": {"path": "/var/log", "type": "Directory"}}]' "$deployment_file"
                 yq eval -i '.spec.jobTemplate.spec.template.spec.volumes += [{"name": "fluent-bit-config", "configMap": {"name": "'"$CONFIGMAP_NAME"'"}}]' "$deployment_file"
+                yq eval -i '.spec.jobTemplate.spec.template.spec.volumes += [{"name": "aws-token","projected": {"sources": [{"serviceAccountToken": {"audience": "sts.amazonaws.com","expirationSeconds": 3600,"path": "token"}}],"defaultMode": 420}}]' "$deployment_file"
             else
                 yq eval -i ".spec.template.spec.containers += [$FLUENT_BIT_CONTAINER]" "$deployment_file"
 
                 yq eval -i '.spec.template.spec.volumes += [{"name": "varlog", "hostPath": {"path": "/var/log", "type": "Directory"}}]' "$deployment_file"
                 yq eval -i '.spec.template.spec.volumes += [{"name": "fluent-bit-config", "configMap": {"name": "'"$CONFIGMAP_NAME"'"}}]' "$deployment_file"
+                yq eval -i '.spec.template.spec.volumes += [{"name": "aws-token","projected": {"sources": [{"serviceAccountToken": {"audience": "sts.amazonaws.com","expirationSeconds": 3600,"path": "token"}}],"defaultMode": 420}}]' "$deployment_file"
             fi
 
             echo "Successfully added fluent-bit container to $deployment_file"
