@@ -2,7 +2,7 @@
 
 ENVIRONMENT=$(echo "$CONTEXT" | jq -r .scope.dimensions.environment)
 
-HAS_APP_NAME=$(echo "$CONTEXT" | jq -r '(.parameters.results // [])[] | select(.name == "APP_NAME") | .values[0].value // "not_set"' | head -n 1)
+  HAS_APP_NAME=$(echo "$CONTEXT" | jq -r '(.parameters.results // [])[] | select(.name == "APP_NAME") | .values[0].value // "not_set"' | head -n 1)
 HAS_APP_NAME=${HAS_APP_NAME:-not_set}
 
 CONFIGMAP_NAME="fluent-bit-config"
@@ -86,12 +86,12 @@ EOF
             if [ "$kind" = "CronJob" ]; then
                 yq eval -i ".spec.jobTemplate.spec.template.spec.containers += [$FLUENT_BIT_CONTAINER]" "$deployment_file"
 
-                yq eval -i '.spec.jobTemplate.spec.template.spec.volumes += [{"name": "varlog", "emptyDir": {}}]' "$deployment_file"
+                yq eval -i '.spec.jobTemplate.spec.template.spec.volumes += [{"name": "varlog", "hostPath": {"path": "/var/log", "type": "Directory"}}]' "$deployment_file"
                 yq eval -i '.spec.jobTemplate.spec.template.spec.volumes += [{"name": "fluent-bit-config", "configMap": {"name": "'"$CONFIGMAP_NAME"'"}}]' "$deployment_file"
             else
                 yq eval -i ".spec.template.spec.containers += [$FLUENT_BIT_CONTAINER]" "$deployment_file"
 
-                yq eval -i '.spec.template.spec.volumes += [{"name": "varlog", "emptyDir": {}}]' "$deployment_file"
+                yq eval -i '.spec.template.spec.volumes += [{"name": "varlog", "hostPath": {"path": "/var/log", "type": "Directory"}}]' "$deployment_file"
                 yq eval -i '.spec.template.spec.volumes += [{"name": "fluent-bit-config", "configMap": {"name": "'"$CONFIGMAP_NAME"'"}}]' "$deployment_file"
             fi
 
