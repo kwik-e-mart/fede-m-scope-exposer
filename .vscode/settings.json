@@ -1,5 +1,0 @@
-{
-  "yaml.schemas": {
-    "workflow.schema.json": "**/workflows/*.yaml"
-  }
-}
