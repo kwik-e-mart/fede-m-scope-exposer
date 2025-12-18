@@ -1,17 +1,25 @@
 #!/bin/bash
 
+echo "=== DEBUG: Starting sync_exposer script ==="
+echo "DEBUG: CONTEXT=$CONTEXT"
+echo "DEBUG: LINK_SPECIFICATION_ID=$LINK_SPECIFICATION_ID"
+
 SCOPE_NRN=$(echo "$CONTEXT" | jq -r .scope.nrn)
 
 echo "LINK SPECIFICATION ID: $LINK_SPECIFICATION_ID, SCOPE_NRN: $SCOPE_NRN"
 
+echo "DEBUG: Fetching links for scope..."
 LINKS=$(np link list --nrn "$SCOPE_NRN" --format json --status active)
+echo "DEBUG: Links fetched. Response: $LINKS"
 
 EXPOSER_LINKS=$(echo "$LINKS" | jq -c --arg spec "$LINK_SPECIFICATION_ID" '
   .results
   | map(select(.specification_id == $spec))
 ')
+echo "DEBUG: EXPOSER_LINKS filtered: $EXPOSER_LINKS"
 
 COUNT=$(echo "$EXPOSER_LINKS" | jq 'length')
+echo "DEBUG: COUNT=$COUNT"
 
 if [[ "$COUNT" -eq 0 ]]; then
   echo "This scope is not public, skipping public ingress synchronization"
@@ -20,37 +28,54 @@ fi
 
 echo "This is a public scope, starting public ingress synchronization"
 
+echo "DEBUG: Fetching link specification actions..."
 ACTIONS=$(np link specification action specification list --linkSpecificationId "$LINK_SPECIFICATION_ID" --format json)
+echo "DEBUG: Actions fetched: $ACTIONS"
 
 REFRESH_ACTION=$(echo "$ACTIONS" | jq -c '
   .results
   | map(select(.slug == "refresh"))
   | .[0]
 ')
+echo "DEBUG: REFRESH_ACTION=$REFRESH_ACTION"
 
 REFRESH_ACTION_ID=$(echo "$REFRESH_ACTION" | jq -r .id)
+echo "DEBUG: REFRESH_ACTION_ID=$REFRESH_ACTION_ID"
 
 # Iterate over matches
+echo "DEBUG: Starting iteration over exposer links..."
 echo "$EXPOSER_LINKS" | jq -c '.[]' | while read -r link; do
+  echo "DEBUG: Processing link: $link"
+
   # Extract useful values
   LINK_ID=$(echo "$link" | jq -r '.id')
+  echo "DEBUG: LINK_ID=$LINK_ID"
 
+  echo "DEBUG: Creating link action..."
   ACTION=$(np link action create --linkId "$LINK_ID" --body "{\"name\": \"refresh\", \"parameters\":{}, \"specification_id\": \"$REFRESH_ACTION_ID\"}" --format json)
+  echo "DEBUG: Action created: $ACTION"
+
   ACTION_ID=$(echo "$ACTION" | jq -r .id)
+  echo "DEBUG: ACTION_ID=$ACTION_ID"
 
   echo "Created public ingress synchronization action[id=$ACTION_ID], waiting for its completion"
 
   MAX_ITERATIONS=20
   iteration=0
 
+  echo "DEBUG: Starting polling loop for action status..."
   while true; do
      ((iteration++))
+      echo "DEBUG: Iteration $iteration/$MAX_ITERATIONS"
+
       if [ "$iteration" -gt $MAX_ITERATIONS ]; then
           echo "Error: Maximum number of iterations (${MAX_ITERATIONS}) reached. Could not refresh the exposer."
           exit 1
       fi
 
+      echo "DEBUG: Reading action status..."
       ACTION_STATUS=$(np link action read --linkId "$LINK_ID" --id "$ACTION_ID" --format json | jq -r .status)
+      echo "DEBUG: ACTION_STATUS=$ACTION_STATUS"
 
       echo "Checking public ingress synchronization action[id=$ACTION_ID, status=$ACTION_STATUS]"
 
@@ -62,6 +87,10 @@ echo "$EXPOSER_LINKS" | jq -c '.[]' | while read -r link; do
         exit 1
       fi
 
+      echo "DEBUG: Sleeping for 5 seconds..."
       sleep 5
   done
+  echo "DEBUG: Finished processing link $LINK_ID"
 done
+
+echo "=== DEBUG: sync_exposer script completed successfully ==="
