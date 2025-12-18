@@ -215,13 +215,31 @@ add_new_route() {
 }
 
 # Main script logic
+echo "=== Starting build_ingress_with_rule for Istio ==="
+echo "K8S_NAMESPACE: $K8S_NAMESPACE"
+echo "SERVICE_ID: $SERVICE_ID"
+echo "SCOPE_ID: $SCOPE_ID"
+echo "RULE_PATH: $RULE_PATH"
+
 VS_NAME=$(kubectl get virtualservice -n "$K8S_NAMESPACE" -l "service_id=$SERVICE_ID" -o jsonpath="{.items[0].metadata.name}")
+echo "Found VirtualService: $VS_NAME"
 
 VIRTUALSERVICE=$(kubectl get virtualservice -n "$K8S_NAMESPACE" "$VS_NAME" -o yaml)
 
 # Extract blue/green annotation and service from SCOPE_RULE (similar to ALB version)
+echo ""
+echo "=== SCOPE_RULE content ==="
+echo "$SCOPE_RULE" | jq '.'
+
 BLUE_GREEN_CONFIG=$(echo "$SCOPE_RULE" | jq -r '.blue_green_annotation // "null"')
+echo ""
+echo "=== Blue/Green Configuration ==="
+echo "BLUE_GREEN_CONFIG: $BLUE_GREEN_CONFIG"
+
 SERVICE=$(echo "$SCOPE_RULE" | jq .service)
+echo ""
+echo "=== Service Configuration ==="
+echo "$SERVICE" | jq '.'
 
 # Define output file
 VS_FILE="$OUTPUT_DIR/virtualservice-$SERVICE_ID-$SCOPE_ID-public.yaml"
@@ -230,21 +248,31 @@ VS_FILE="$OUTPUT_DIR/virtualservice-$SERVICE_ID-$SCOPE_ID-public.yaml"
 mkdir -p "$OUTPUT_DIR"
 
 # Use case 1 - empty virtualservice
-if [[ "$(is_virtualservice_empty "$VIRTUALSERVICE")" == "true" ]]; then
+echo ""
+echo "=== Checking if VirtualService is empty ==="
+IS_EMPTY=$(is_virtualservice_empty "$VIRTUALSERVICE")
+echo "Is VirtualService empty? $IS_EMPTY"
+
+if [[ "$IS_EMPTY" == "true" ]]; then
+  echo "Case 1: Updating empty VirtualService"
   UPDATED_VS=$(update_virtualservice_route "$VIRTUALSERVICE" "$RULE_PATH" "$SERVICE" "$BLUE_GREEN_CONFIG")
   echo "$UPDATED_VS" | yq "." > "$VS_FILE"
 else
   ROUTE_INDEX=$(find_route_index "$VIRTUALSERVICE" "$RULE_PATH")
+  echo "Found route index for path '$RULE_PATH': $ROUTE_INDEX"
 
   # if there is a route for the path we replace it
   if [[ "$ROUTE_INDEX" != "-1" ]]; then
+    echo "Case 2: Replacing existing route at index $ROUTE_INDEX"
     UPDATED_VS=$(replace_existing_route "$VIRTUALSERVICE" "$RULE_PATH" "$SERVICE" "$BLUE_GREEN_CONFIG" "$ROUTE_INDEX")
     echo "$UPDATED_VS" | yq "." > "$VS_FILE"
   else
     # if there is no route for the path we add a new one
+    echo "Case 3: Adding new route"
     UPDATED_VS=$(add_new_route "$VIRTUALSERVICE" "$RULE_PATH" "$SERVICE" "$BLUE_GREEN_CONFIG")
     echo "$UPDATED_VS" | yq "." > "$VS_FILE"
   fi
 fi
 
-echo "VirtualService configuration saved to: $VS_FILE"
+echo ""
+echo "=== VirtualService configuration saved to: $VS_FILE ==="
