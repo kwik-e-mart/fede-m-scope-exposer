@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-VS_NAME=$(kubectl get virtualservice -n "$K8S_NAMESPACE" -l "scope_id=$SCOPE_ID" -o jsonpath="{.items[0].metadata.name}" 2>/dev/null || echo "")
+VS_NAME=$(kubectl get virtualservice -n "$K8S_NAMESPACE" -l "service_id=$SERVICE_ID" -o jsonpath="{.items[0].metadata.name}")
 
 # Check if virtualservice exists
 if [ -z "$VS_NAME" ]; then
