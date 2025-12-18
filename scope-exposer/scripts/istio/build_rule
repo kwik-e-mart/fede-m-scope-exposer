@@ -21,7 +21,7 @@ if [[ "$IN_PROGRESS_DEPLOYMENT" != "null" ]]; then
     echo "DEBUG: Found in-progress deployment, fetching details..."
     DEPLOYMENT_JSON=$(np deployment read --id "$IN_PROGRESS_DEPLOYMENT" --format json)
     DEPLOYMENT_STATUS=$(echo "$DEPLOYMENT_JSON" | jq -r '.status')
-    SWITCHED_TRAFFIC=$(echo "$DEPLOYMENT_JSON" | jq -r '.strategy_data.switched_traffic // 0')
+    SWITCHED_TRAFFIC=$(echo "$DEPLOYMENT_JSON" | jq -r '.strategy_data.desired_switched_traffic // 0')
     echo "DEBUG: DEPLOYMENT_STATUS=$DEPLOYMENT_STATUS"
     echo "DEBUG: SWITCHED_TRAFFIC=$SWITCHED_TRAFFIC"
 fi
@@ -165,5 +165,3 @@ else
 fi
 
 export SCOPE_RULE
-echo "DEBUG: Final SCOPE_RULE exported: $SCOPE_RULE"
-echo "=== DEBUG: build_rule script completed ==="
