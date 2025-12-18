@@ -2,87 +2,76 @@
 
 set -euo pipefail
 
-VS_NAME=$(kubectl get virtualservice -n "$K8S_NAMESPACE" -l "service_id=$SERVICE_ID" -o jsonpath="{.items[0].metadata.name}")
+# Get services with scope_id label
+SERVICES_JSON=$(kubectl get services -n "$K8S_NAMESPACE" -l "scope_id=$SCOPE_ID" -o json)
+NUM_SERVICES=$(echo "$SERVICES_JSON" | jq '.items | length')
 
-# Check if virtualservice exists
-if [ -z "$VS_NAME" ]; then
-    echo "There is no VirtualService for service_id=$SERVICE_ID. Publishing the rule with an empty backend"
+if [[ "$NUM_SERVICES" -eq 0 ]]; then
+    echo "There is no service for scope_id=$SCOPE_ID. Publishing the rule with an empty backend"
 
     SCOPE_RULE='{"service": {"name": "response-404", "port": { "number": 80} }}'
+elif [[ "$NUM_SERVICES" -eq 1 ]]; then
+    echo "Found single service for scope_id=$SCOPE_ID"
+
+    SERVICE_NAME=$(echo "$SERVICES_JSON" | jq -r '.items[0].metadata.name')
+    SERVICE_PORT=$(echo "$SERVICES_JSON" | jq -r '.items[0].spec.ports[0].port')
+
+    echo "Service: $SERVICE_NAME, Port: $SERVICE_PORT"
+
+    SCOPE_RULE=$(jq -n \
+        --arg name "$SERVICE_NAME" \
+        --argjson port "$SERVICE_PORT" \
+        '{
+            service: {
+                name: $name,
+                port: {
+                    number: $port
+                }
+            }
+        }')
 else
-    echo "Found VirtualService '$VS_NAME' for service_id=$SERVICE_ID. Extracting backend service configuration"
-    VIRTUALSERVICE=$(kubectl get virtualservice -n "$K8S_NAMESPACE" "$VS_NAME" -o json)
+    echo "Detected blue/green deployment with $NUM_SERVICES services for scope_id=$SCOPE_ID"
 
-    # Check if there are multiple routes (blue/green deployment)
-    NUM_ROUTES=$(echo "$VIRTUALSERVICE" | jq '.spec.http[0].route | length')
+    # Extract blue and green services (assuming first two services)
+    BLUE_SERVICE=$(echo "$SERVICES_JSON" | jq -r '.items[0].metadata.name')
+    BLUE_PORT=$(echo "$SERVICES_JSON" | jq -r '.items[0].spec.ports[0].port')
+    BLUE_WEIGHT=$(echo "$SERVICES_JSON" | jq -r '.items[0].metadata.annotations["weight"] // "100"' | sed 's/"//g')
 
-    if [[ "$NUM_ROUTES" -gt 1 ]]; then
-        echo "Detected blue/green deployment with $NUM_ROUTES routes"
+    GREEN_SERVICE=$(echo "$SERVICES_JSON" | jq -r '.items[1].metadata.name')
+    GREEN_PORT=$(echo "$SERVICES_JSON" | jq -r '.items[1].spec.ports[0].port')
+    GREEN_WEIGHT=$(echo "$SERVICES_JSON" | jq -r '.items[1].metadata.annotations["weight"] // "0"' | sed 's/"//g')
 
-        # Extract blue and green services with weights
-        BLUE_HOST=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[0].destination.host')
-        BLUE_PORT=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[0].destination.port.number')
-        BLUE_WEIGHT=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[0].weight // 100')
+    echo "Blue: $BLUE_SERVICE (weight: $BLUE_WEIGHT), Green: $GREEN_SERVICE (weight: $GREEN_WEIGHT)"
 
-        GREEN_HOST=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[1].destination.host')
-        GREEN_PORT=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[1].destination.port.number')
-        GREEN_WEIGHT=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[1].weight // 0')
-
-        # Extract just the service name (remove FQDN if present)
-        BLUE_SERVICE=$(echo "$BLUE_HOST" | cut -d'.' -f1)
-        GREEN_SERVICE=$(echo "$GREEN_HOST" | cut -d'.' -f1)
-
-        # Build blue/green annotation similar to ALB format
-        SCOPE_RULE=$(jq -n \
-            --arg blue_service "$BLUE_SERVICE" \
-            --argjson blue_weight "$BLUE_WEIGHT" \
-            --arg green_service "$GREEN_SERVICE" \
-            --argjson green_weight "$GREEN_WEIGHT" \
-            --argjson port "$BLUE_PORT" \
-            '{
-                blue_green_annotation: {
-                    forward: {
-                        targetGroups: [
-                            {
-                                serviceName: $blue_service,
-                                weight: $blue_weight
-                            },
-                            {
-                                serviceName: $green_service,
-                                weight: $green_weight
-                            }
-                        ]
-                    }
-                },
-                service: {
-                    name: $blue_service,
-                    port: {
-                        number: $port
-                    }
+    # Build blue/green annotation similar to ALB format
+    SCOPE_RULE=$(jq -n \
+        --arg blue_service "$BLUE_SERVICE" \
+        --argjson blue_weight "$BLUE_WEIGHT" \
+        --arg green_service "$GREEN_SERVICE" \
+        --argjson green_weight "$GREEN_WEIGHT" \
+        --argjson port "$BLUE_PORT" \
+        '{
+            blue_green_annotation: {
+                forward: {
+                    targetGroups: [
+                        {
+                            serviceName: $blue_service,
+                            weight: $blue_weight
+                        },
+                        {
+                            serviceName: $green_service,
+                            weight: $green_weight
+                        }
+                    ]
                 }
-            }')
-    else
-        echo "Single service deployment detected"
-
-        # Extract the service host and port from the first route
-        SERVICE_HOST=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[0].destination.host')
-        SERVICE_PORT=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[0].destination.port.number')
-
-        # Extract just the service name (remove FQDN if present)
-        SERVICE_NAME=$(echo "$SERVICE_HOST" | cut -d'.' -f1)
-
-        SCOPE_RULE=$(jq -n \
-            --arg name "$SERVICE_NAME" \
-            --argjson port "$SERVICE_PORT" \
-            '{
-                service: {
-                    name: $name,
-                    port: {
-                        number: $port
-                    }
+            },
+            service: {
+                name: $blue_service,
+                port: {
+                    number: $port
                 }
-            }')
-    fi
+            }
+        }')
 fi
 
 export SCOPE_RULE

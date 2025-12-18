@@ -27,6 +27,8 @@ steps:
         type: environment
       - name: RULE_PATH
         type: environment
+      - name: SCOPE_ID
+        type: environment
   - name: "validate_unique_rule"
     type: script
     file: "$SERVICE_PATH/scripts/istio/validate_unique_rule"
