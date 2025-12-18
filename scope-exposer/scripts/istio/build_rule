@@ -6,31 +6,83 @@ VS_NAME=$(kubectl get virtualservice -n "$K8S_NAMESPACE" -l "service_id=$SERVICE
 
 # Check if virtualservice exists
 if [ -z "$VS_NAME" ]; then
-    echo "There is no VirtualService for scope $SCOPE_ID. Publishing the rule with an empty backend"
+    echo "There is no VirtualService for service_id=$SERVICE_ID. Publishing the rule with an empty backend"
 
     SCOPE_RULE='{"service": {"name": "response-404", "port": { "number": 80} }}'
 else
-    echo "Found VirtualService for scope $SCOPE_ID. Publishing the backend service configuration"
+    echo "Found VirtualService '$VS_NAME' for service_id=$SERVICE_ID. Extracting backend service configuration"
     VIRTUALSERVICE=$(kubectl get virtualservice -n "$K8S_NAMESPACE" "$VS_NAME" -o json)
 
-    # Extract the service host and port from the first route
-    SERVICE_HOST=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[0].destination.host')
-    SERVICE_PORT=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[0].destination.port.number')
+    # Check if there are multiple routes (blue/green deployment)
+    NUM_ROUTES=$(echo "$VIRTUALSERVICE" | jq '.spec.http[0].route | length')
 
-    # Extract just the service name from the FQDN (remove namespace and cluster domain)
-    SERVICE_NAME=$(echo "$SERVICE_HOST" | cut -d'.' -f1)
+    if [[ "$NUM_ROUTES" -gt 1 ]]; then
+        echo "Detected blue/green deployment with $NUM_ROUTES routes"
 
-    SCOPE_RULE=$(jq -n \
-        --arg name "$SERVICE_NAME" \
-        --arg port "$SERVICE_PORT" \
-        '{
-            service: {
-                name: $name,
-                port: {
-                    number: ($port | tonumber)
+        # Extract blue and green services with weights
+        BLUE_HOST=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[0].destination.host')
+        BLUE_PORT=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[0].destination.port.number')
+        BLUE_WEIGHT=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[0].weight // 100')
+
+        GREEN_HOST=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[1].destination.host')
+        GREEN_PORT=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[1].destination.port.number')
+        GREEN_WEIGHT=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[1].weight // 0')
+
+        # Extract just the service name (remove FQDN if present)
+        BLUE_SERVICE=$(echo "$BLUE_HOST" | cut -d'.' -f1)
+        GREEN_SERVICE=$(echo "$GREEN_HOST" | cut -d'.' -f1)
+
+        # Build blue/green annotation similar to ALB format
+        SCOPE_RULE=$(jq -n \
+            --arg blue_service "$BLUE_SERVICE" \
+            --argjson blue_weight "$BLUE_WEIGHT" \
+            --arg green_service "$GREEN_SERVICE" \
+            --argjson green_weight "$GREEN_WEIGHT" \
+            --argjson port "$BLUE_PORT" \
+            '{
+                blue_green_annotation: {
+                    forward: {
+                        targetGroups: [
+                            {
+                                serviceName: $blue_service,
+                                weight: $blue_weight
+                            },
+                            {
+                                serviceName: $green_service,
+                                weight: $green_weight
+                            }
+                        ]
+                    }
+                },
+                service: {
+                    name: $blue_service,
+                    port: {
+                        number: $port
+                    }
                 }
-            }
-        }')
+            }')
+    else
+        echo "Single service deployment detected"
+
+        # Extract the service host and port from the first route
+        SERVICE_HOST=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[0].destination.host')
+        SERVICE_PORT=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[0].destination.port.number')
+
+        # Extract just the service name (remove FQDN if present)
+        SERVICE_NAME=$(echo "$SERVICE_HOST" | cut -d'.' -f1)
+
+        SCOPE_RULE=$(jq -n \
+            --arg name "$SERVICE_NAME" \
+            --argjson port "$SERVICE_PORT" \
+            '{
+                service: {
+                    name: $name,
+                    port: {
+                        number: $port
+                    }
+                }
+            }')
+    fi
 fi
 
 export SCOPE_RULE
