@@ -28,16 +28,13 @@ fi
 
 echo "This is a public scope, starting public ingress synchronization"
 
-echo "DEBUG: Fetching link specification actions..."
 ACTIONS=$(np link specification action specification list --linkSpecificationId "$LINK_SPECIFICATION_ID" --format json)
-echo "DEBUG: Actions fetched: $ACTIONS"
 
 REFRESH_ACTION=$(echo "$ACTIONS" | jq -c '
   .results
   | map(select(.slug == "refresh"))
   | .[0]
 ')
-echo "DEBUG: REFRESH_ACTION=$REFRESH_ACTION"
 
 REFRESH_ACTION_ID=$(echo "$REFRESH_ACTION" | jq -r .id)
 echo "DEBUG: REFRESH_ACTION_ID=$REFRESH_ACTION_ID"
@@ -75,7 +72,6 @@ echo "$EXPOSER_LINKS" | jq -c '.[]' | while read -r link; do
 
       echo "DEBUG: Reading action status..."
       ACTION_STATUS=$(np link action read --linkId "$LINK_ID" --id "$ACTION_ID" --format json | jq -r .status)
-      echo "DEBUG: ACTION_STATUS=$ACTION_STATUS"
 
       echo "Checking public ingress synchronization action[id=$ACTION_ID, status=$ACTION_STATUS]"
 
