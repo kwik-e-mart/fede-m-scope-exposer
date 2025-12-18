@@ -1,0 +1,47 @@
+#!/bin/bash
+
+set -euo pipefail
+
+find_route_index() {
+  local vs_yaml="$1"
+  local target_path="$2"
+
+  local num_routes
+  local i
+  local current_path
+
+  num_routes=$(yq '.spec.http | length' <<< "$vs_yaml")
+
+  for ((i=0; i<num_routes; i++)); do
+    current_path=$(yq ".spec.http[$i].match[0].uri.prefix" <<< "$vs_yaml")
+    if [[ "$current_path" == "\"$target_path\"" || "$current_path" == "$target_path" ]]; then
+      echo "$i"
+      return
+    fi
+  done
+
+  echo "-1"  # Not found
+}
+
+VS_NAME=$(kubectl get virtualservice -n "$K8S_NAMESPACE" -l "service_id=$SERVICE_ID" -o jsonpath="{.items[0].metadata.name}")
+VIRTUALSERVICE=$(kubectl get virtualservice -n "$K8S_NAMESPACE" "$VS_NAME" -o yaml)
+VS_FILE="$OUTPUT_DIR/virtualservice-$SERVICE_ID-$SCOPE_ID-public.yaml"
+
+updated_vs="$VIRTUALSERVICE"
+
+ROUTE_INDEX=$(find_route_index "$VIRTUALSERVICE" "$RULE_PATH")
+
+# if there is a route for the path we remove it
+if [[ "$ROUTE_INDEX" != "-1" ]]; then
+  updated_vs=$(echo "$updated_vs" | yq eval "del(.spec.http[$ROUTE_INDEX])" -)
+
+  remaining_routes=$(echo "$updated_vs" | yq '.spec.http | length')
+  if [[ "$remaining_routes" == "0" ]]; then
+    # If no routes remain, add the default 404 route
+    updated_vs=$(echo "$updated_vs" | yq eval '.spec.http = [{"match": [{"uri": {"prefix": "/"}}], "fault": {"abort": {"percentage": {"value": 100}, "httpStatus": 404}}, "route": [{"destination": {"host": "response-404.'$K8S_NAMESPACE'.svc.cluster.local", "port": {"number": 80}}}]}]' -)
+  fi
+fi
+
+echo "$updated_vs" | yq "." > "$VS_FILE"
+
+

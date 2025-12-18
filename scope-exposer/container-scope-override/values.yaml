@@ -1,3 +1,6 @@
 configuration:
-  LINK_SPECIFICATION_ID: b229c8c8-101a-4dab-b0b0-7aa2e23d1bc1
+  # Fede
+  #LINK_SPECIFICATION_ID: b229c8c8-101a-4dab-b0b0-7aa2e23d1bc1
+  # Javi
+  LINK_SPECIFICATION_ID: a63021eb-2c5e-4ea1-b21c-a6d188c437ca
   

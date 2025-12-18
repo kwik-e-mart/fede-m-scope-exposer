@@ -1,7 +1,7 @@
 steps:
   - name: "find k8s namespace"
     type: script
-    file: "$SERVICE_PATH/scripts/fetch_provider_data"
+    file: "$SERVICE_PATH/scripts/istio/fetch_provider_data"
     output:
       - name: K8S_NAMESPACE
         type: environment
@@ -9,7 +9,7 @@ steps:
         type: environment
   - name: "build context"
     type: script
-    file: "$SERVICE_PATH/scripts/build_context"
+    file: "$SERVICE_PATH/scripts/istio/build_context"
     output:
       - name: SERVICE_ID
         type: environment
@@ -29,19 +29,19 @@ steps:
         type: environment
   - name: "build_template"
     type: script
-    file: "$SERVICE_PATH/scripts/build_ingress_without_rule"
+    file: "$SERVICE_PATH/scripts/istio/build_ingress_without_rule"
     output:
-      - name: INGRESS_FILE
+      - name: VS_FILE
         type: file
-        file: "$OUTPUT_DIR/ingress-$SERVICE_ID-$SCOPE_ID-public.yaml"
+        file: "$OUTPUT_DIR/virtualservice-$SERVICE_ID-$SCOPE_ID-public.yaml"
   - name: apply
     type: script
-    file: "$SERVICE_PATH/scripts/apply"
+    file: "$SERVICE_PATH/scripts/istio/apply"
     configuration:
       ACTION: apply
       DRY_RUN: false
   - name: "add_rule_to_service"
     type: script
-    file: "$SERVICE_PATH/scripts/update_service"
+    file: "$SERVICE_PATH/scripts/istio/update_service"
     configuration:
       ACTION: remove

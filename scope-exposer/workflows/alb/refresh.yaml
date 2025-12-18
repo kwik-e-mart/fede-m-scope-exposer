@@ -1,5 +1,5 @@
 include:
-  - "$SERVICE_PATH/workflows/link.yaml"
+  - "$SERVICE_PATH/workflows/alb/link.yaml"
 steps:
   - name: "validate_unique_rule"
     action: skip

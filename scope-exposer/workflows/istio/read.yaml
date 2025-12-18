@@ -1,7 +1,7 @@
 steps:
   - name: "find k8s namespace"
     type: script
-    file: "$SERVICE_PATH/scripts/fetch_provider_data"
+    file: "$SERVICE_PATH/scripts/istio/fetch_provider_data"
     output:
       - name: K8S_NAMESPACE
         type: environment
@@ -9,7 +9,7 @@ steps:
         type: environment
   - name: "build context"
     type: script
-    file: "$SERVICE_PATH/scripts/build_context"
+    file: "$SERVICE_PATH/scripts/istio/build_context"
     output:
       - name: SERVICE_ID
         type: environment
@@ -29,4 +29,4 @@ steps:
         type: environment
   - name: read
     type: script
-    file: "$SERVICE_PATH/scripts/read_ingress"
+    file: "$SERVICE_PATH/scripts/istio/read_ingress"

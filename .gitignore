@@ -141,3 +141,6 @@ build
 
 output
 output/*
+
+# Visual Studio Code files
+.vscode/

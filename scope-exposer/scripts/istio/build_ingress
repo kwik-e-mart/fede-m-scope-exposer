@@ -1,0 +1,22 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SERVICE_DOMAIN=$(echo "$CONTEXT" | jq -r .parameters.domain)
+
+echo "Creating VirtualService for service $SERVICE_NAME with domain $SERVICE_DOMAIN"
+
+echo "Creating public VirtualService..."
+
+VS_FILE="$OUTPUT_DIR/virtualservice-$SERVICE_ID-public.yaml"
+CONTEXT_PATH="$OUTPUT_DIR/context-$SERVICE_ID.json"
+
+echo "$CONTEXT" > "$CONTEXT_PATH"
+
+echo "Building Template: $TEMPLATE to $VS_FILE"
+
+gomplate -c .="$CONTEXT_PATH" \
+  --file "$TEMPLATE" \
+  --out "$VS_FILE"
+
+rm "$CONTEXT_PATH"

@@ -1,7 +1,7 @@
 steps:
   - name: "find k8s namespace"
     type: script
-    file: "$SERVICE_PATH/scripts/fetch_provider_data"
+    file: "$SERVICE_PATH/scripts/alb/fetch_provider_data"
     output:
       - name: K8S_NAMESPACE
         type: environment
@@ -9,7 +9,7 @@ steps:
         type: environment
   - name: "build context"
     type: script
-    file: "$SERVICE_PATH/scripts/build_context"
+    file: "$SERVICE_PATH/scripts/alb/build_context"
     output:
       - name: SERVICE_ID
         type: environment
@@ -27,18 +27,30 @@ steps:
         type: environment
       - name: RULE_PATH
         type: environment
-  - name: "build template"
+  - name: "validate_unique_rule"
     type: script
-    file: "$SERVICE_PATH/scripts/build_ingress"
-    configuration:
-      TEMPLATE: "$SERVICE_PATH/templates/empty.yaml.tpl"
+    file: "$SERVICE_PATH/scripts/alb/validate_unique_rule"
+  - name: "build_rule"
+    type: script
+    file : "$SERVICE_PATH/scripts/alb/build_rule"
+    output:
+      - name: SCOPE_RULE
+        type: environment
+  - name: "build_ingress"
+    type: script
+    file: "$SERVICE_PATH/scripts/alb/build_ingress_with_rule"
     output:
       - name: INGRESS_FILE
         type: file
         file: "$OUTPUT_DIR/ingress-$SERVICE_ID-$SCOPE_ID-public.yaml"
   - name: apply
     type: script
-    file: "$SERVICE_PATH/scripts/apply"
+    file: "$SERVICE_PATH/scripts/alb/apply"
     configuration:
       ACTION: apply
       DRY_RUN: false
+  - name: "add_rule_to_service"
+    type: script
+    file: "$SERVICE_PATH/scripts/alb/update_service"
+    configuration:
+      ACTION: add

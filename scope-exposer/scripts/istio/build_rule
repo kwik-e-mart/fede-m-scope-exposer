@@ -1,0 +1,36 @@
+#!/bin/bash
+
+set -euo pipefail
+
+VS_NAME=$(kubectl get virtualservice -n "$K8S_NAMESPACE" -l "scope_id=$SCOPE_ID" -o jsonpath="{.items[0].metadata.name}" 2>/dev/null || echo "")
+
+# Check if virtualservice exists
+if [ -z "$VS_NAME" ]; then
+    echo "There is no VirtualService for scope $SCOPE_ID. Publishing the rule with an empty backend"
+
+    SCOPE_RULE='{"service": {"name": "response-404", "port": { "number": 80} }}'
+else
+    echo "Found VirtualService for scope $SCOPE_ID. Publishing the backend service configuration"
+    VIRTUALSERVICE=$(kubectl get virtualservice -n "$K8S_NAMESPACE" "$VS_NAME" -o json)
+
+    # Extract the service host and port from the first route
+    SERVICE_HOST=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[0].destination.host')
+    SERVICE_PORT=$(echo "$VIRTUALSERVICE" | jq -r '.spec.http[0].route[0].destination.port.number')
+
+    # Extract just the service name from the FQDN (remove namespace and cluster domain)
+    SERVICE_NAME=$(echo "$SERVICE_HOST" | cut -d'.' -f1)
+
+    SCOPE_RULE=$(jq -n \
+        --arg name "$SERVICE_NAME" \
+        --arg port "$SERVICE_PORT" \
+        '{
+            service: {
+                name: $name,
+                port: {
+                    number: ($port | tonumber)
+                }
+            }
+        }')
+fi
+
+export SCOPE_RULE

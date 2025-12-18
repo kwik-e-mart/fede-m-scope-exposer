@@ -1,0 +1,56 @@
+steps:
+  - name: "find k8s namespace"
+    type: script
+    file: "$SERVICE_PATH/scripts/istio/fetch_provider_data"
+    output:
+      - name: K8S_NAMESPACE
+        type: environment
+      - name: ALB_NAME
+        type: environment
+  - name: "build context"
+    type: script
+    file: "$SERVICE_PATH/scripts/istio/build_context"
+    output:
+      - name: SERVICE_ID
+        type: environment
+      - name: SERVICE_NAME
+        type: environment
+      - name: ACTION_ID
+        type: environment
+      - name: ACTION_NAME
+        type: environment
+      - name: LINK_ID
+        type: environment
+      - name: LINK_NAME
+        type: environment
+      - name: SCOPE_ID
+        type: environment
+      - name: RULE_PATH
+        type: environment
+  - name: "validate_unique_rule"
+    type: script
+    file: "$SERVICE_PATH/scripts/istio/validate_unique_rule"
+  - name: "build_rule"
+    type: script
+    file : "$SERVICE_PATH/scripts/istio/build_rule"
+    output:
+      - name: SCOPE_RULE
+        type: environment
+  - name: "build_ingress"
+    type: script
+    file: "$SERVICE_PATH/scripts/istio/build_ingress_with_rule"
+    output:
+      - name: VS_FILE
+        type: file
+        file: "$OUTPUT_DIR/virtualservice-$SERVICE_ID-$SCOPE_ID-public.yaml"
+  - name: apply
+    type: script
+    file: "$SERVICE_PATH/scripts/istio/apply"
+    configuration:
+      ACTION: apply
+      DRY_RUN: false
+  - name: "add_rule_to_service"
+    type: script
+    file: "$SERVICE_PATH/scripts/istio/update_service"
+    configuration:
+      ACTION: add

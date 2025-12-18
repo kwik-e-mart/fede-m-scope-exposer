@@ -1,0 +1,172 @@
+#!/bin/bash
+
+set -euo pipefail
+
+is_virtualservice_empty() {
+  local yaml_content="$1"
+
+  local num_http_routes
+  local has_fault
+  local service_host
+
+  num_http_routes=$(yq '.spec.http | length' <<< "$yaml_content")
+  has_fault=$(yq '.spec.http[0].fault.abort' <<< "$yaml_content")
+  service_host=$(yq '.spec.http[0].route[0].destination.host' <<< "$yaml_content")
+
+  # A VirtualService is "empty" if it only has one route with a 404 fault injection to response-404
+  if [[ "$num_http_routes" -eq 1 && \
+        "$has_fault" != "null" && \
+        "$service_host" =~ response-404 ]]; then
+    echo "true"
+  else
+    echo "false"
+  fi
+}
+
+create_http_route() {
+  local rule_path="$1"
+  local service_json="$2"
+
+  local service_name
+  local service_port
+
+  service_name=$(echo "$service_json" | jq -r '.name')
+  service_port=$(echo "$service_json" | jq -r '.port.number // .port.name // 80')
+
+  jq -n \
+    --arg path "$rule_path" \
+    --arg service_name "$service_name" \
+    --arg service_port "$service_port" \
+    --arg namespace "$K8S_NAMESPACE" \
+    '{
+      match: [
+        {
+          uri: {
+            prefix: $path
+          }
+        }
+      ],
+      route: [
+        {
+          destination: {
+            host: ($service_name + "." + $namespace + ".svc.cluster.local"),
+            port: {
+              number: ($service_port | tonumber)
+            }
+          }
+        }
+      ]
+    }'
+}
+
+update_virtualservice_route() {
+  local vs_yaml="$1"
+  local rule_path="$2"
+  local service_json="$3"
+
+  local service_name
+  local service_port
+  local updated_vs
+
+  service_name=$(echo "$service_json" | jq -r '.name')
+  service_port=$(echo "$service_json" | jq -r '.port.number // .port.name // 80')
+
+  # Replace the current route with the new route data (remove fault injection, set real service)
+  updated_vs=$(echo "$vs_yaml" | yq eval 'del(.spec.http[0].fault)')
+  updated_vs=$(echo "$updated_vs" | yq eval ".spec.http[0].match[0].uri.prefix = \"$rule_path\"")
+  updated_vs=$(echo "$updated_vs" | yq eval ".spec.http[0].route[0].destination.host = \"${service_name}.${K8S_NAMESPACE}.svc.cluster.local\"")
+  updated_vs=$(echo "$updated_vs" | yq eval ".spec.http[0].route[0].destination.port.number = $service_port")
+
+  echo "$updated_vs"
+}
+
+find_route_index() {
+  local vs_yaml="$1"
+  local target_path="$2"
+
+  local num_routes
+  local i
+  local current_path
+
+  num_routes=$(yq '.spec.http | length' <<< "$vs_yaml")
+
+  for ((i=0; i<num_routes; i++)); do
+    current_path=$(yq ".spec.http[$i].match[0].uri.prefix" <<< "$vs_yaml")
+    if [[ "$current_path" == "\"$target_path\"" || "$current_path" == "$target_path" ]]; then
+      echo "$i"
+      return
+    fi
+  done
+
+  echo "-1"  # Not found
+}
+
+replace_existing_route() {
+  local vs_yaml="$1"
+  local rule_path="$2"
+  local service_json="$3"
+  local route_index="$4"
+
+  local updated_vs
+  local new_route
+
+  # Create the new route
+  new_route=$(create_http_route "$rule_path" "$service_json")
+
+  # Replace the existing route at the found index
+  updated_vs=$(echo "$vs_yaml" | yq eval -o=json '.' | \
+    jq --argjson newroute "$new_route" ".spec.http[$route_index] = \$newroute" | \
+    yq eval -P '.')
+
+  echo "$updated_vs" | yq .
+}
+
+add_new_route() {
+  local vs_yaml="$1"
+  local rule_path="$2"
+  local service_json="$3"
+
+  local updated_vs
+  local new_route
+
+  # Create the new http route
+  new_route=$(create_http_route "$rule_path" "$service_json")
+
+  # Add the new route to the existing http array
+  updated_vs=$(echo "$vs_yaml" | yq eval ".spec.http += [$new_route]")
+
+  echo "$updated_vs"
+}
+
+# Main script logic
+VS_NAME=$(kubectl get virtualservice -n "$K8S_NAMESPACE" -l "service_id=$SERVICE_ID" -o jsonpath="{.items[0].metadata.name}")
+
+VIRTUALSERVICE=$(kubectl get virtualservice -n "$K8S_NAMESPACE" "$VS_NAME" -o yaml)
+
+SERVICE=$(echo "$SCOPE_RULE" | jq .service)
+
+# Define output file
+VS_FILE="$OUTPUT_DIR/virtualservice-$SERVICE_ID-$SCOPE_ID-public.yaml"
+
+# Create output directory if it doesn't exist
+mkdir -p "$OUTPUT_DIR"
+
+# Use case 1 - empty virtualservice
+if [[ "$(is_virtualservice_empty "$VIRTUALSERVICE")" == "true" ]]; then
+  UPDATED_VS=$(update_virtualservice_route "$VIRTUALSERVICE" "$RULE_PATH" "$SERVICE")
+  echo "$UPDATED_VS" | yq "." > "$VS_FILE"
+else
+  ROUTE_INDEX=$(find_route_index "$VIRTUALSERVICE" "$RULE_PATH")
+
+  # if there is a route for the path we replace it
+  if [[ "$ROUTE_INDEX" != "-1" ]]; then
+    UPDATED_VS=$(replace_existing_route "$VIRTUALSERVICE" "$RULE_PATH" "$SERVICE" "$ROUTE_INDEX")
+    echo "$UPDATED_VS" | yq "." > "$VS_FILE"
+  else
+    # if there is no route for the path we add a new one
+    UPDATED_VS=$(add_new_route "$VIRTUALSERVICE" "$RULE_PATH" "$SERVICE")
+    echo "$UPDATED_VS" | yq "." > "$VS_FILE"
+  fi
+fi
+
+echo "VirtualService configuration saved to: $VS_FILE"

@@ -1,5 +1,5 @@
 include:
-  - "$SERVICE_PATH/workflows/create.yaml"
+  - "$SERVICE_PATH/workflows/istio/create.yaml"
 steps:
   - name: apply
     configuration:
