@@ -26,6 +26,7 @@ is_virtualservice_empty() {
 create_http_route() {
   local rule_path="$1"
   local service_json="$2"
+  local blue_green_config="$3"
 
   local service_name
   local service_port
@@ -33,36 +34,88 @@ create_http_route() {
   service_name=$(echo "$service_json" | jq -r '.name')
   service_port=$(echo "$service_json" | jq -r '.port.number // .port.name // 80')
 
-  jq -n \
-    --arg path "$rule_path" \
-    --arg service_name "$service_name" \
-    --arg service_port "$service_port" \
-    --arg namespace "$K8S_NAMESPACE" \
-    '{
-      match: [
-        {
-          uri: {
-            prefix: $path
-          }
-        }
-      ],
-      route: [
-        {
-          destination: {
-            host: ($service_name + "." + $namespace + ".svc.cluster.local"),
-            port: {
-              number: ($service_port | tonumber)
+  # Check if there's blue/green configuration
+  if [[ "$blue_green_config" != "null" && -n "$blue_green_config" ]]; then
+    # Parse blue/green destinations and weights from the annotation
+    local blue_weight green_weight blue_service green_service
+
+    blue_weight=$(echo "$blue_green_config" | jq -r '.forward.targetGroups[0].weight // 100')
+    green_weight=$(echo "$blue_green_config" | jq -r '.forward.targetGroups[1].weight // 0')
+    blue_service=$(echo "$blue_green_config" | jq -r '.forward.targetGroups[0].serviceName')
+    green_service=$(echo "$blue_green_config" | jq -r '.forward.targetGroups[1].serviceName')
+
+    # Create route with weighted destinations
+    jq -n \
+      --arg path "$rule_path" \
+      --arg blue_service "$blue_service" \
+      --arg green_service "$green_service" \
+      --arg service_port "$service_port" \
+      --arg namespace "$K8S_NAMESPACE" \
+      --argjson blue_weight "$blue_weight" \
+      --argjson green_weight "$green_weight" \
+      '{
+        match: [
+          {
+            uri: {
+              prefix: $path
             }
           }
-        }
-      ]
-    }'
+        ],
+        route: [
+          {
+            destination: {
+              host: ($blue_service + "." + $namespace + ".svc.cluster.local"),
+              port: {
+                number: ($service_port | tonumber)
+              }
+            },
+            weight: $blue_weight
+          },
+          {
+            destination: {
+              host: ($green_service + "." + $namespace + ".svc.cluster.local"),
+              port: {
+                number: ($service_port | tonumber)
+              }
+            },
+            weight: $green_weight
+          }
+        ]
+      }'
+  else
+    # Single destination without blue/green
+    jq -n \
+      --arg path "$rule_path" \
+      --arg service_name "$service_name" \
+      --arg service_port "$service_port" \
+      --arg namespace "$K8S_NAMESPACE" \
+      '{
+        match: [
+          {
+            uri: {
+              prefix: $path
+            }
+          }
+        ],
+        route: [
+          {
+            destination: {
+              host: ($service_name + "." + $namespace + ".svc.cluster.local"),
+              port: {
+                number: ($service_port | tonumber)
+              }
+            }
+          }
+        ]
+      }'
+  fi
 }
 
 update_virtualservice_route() {
   local vs_yaml="$1"
   local rule_path="$2"
   local service_json="$3"
+  local blue_green_config="$4"
 
   local service_name
   local service_port
@@ -71,11 +124,32 @@ update_virtualservice_route() {
   service_name=$(echo "$service_json" | jq -r '.name')
   service_port=$(echo "$service_json" | jq -r '.port.number // .port.name // 80')
 
-  # Replace the current route with the new route data (remove fault injection, set real service)
+  # Remove fault injection
   updated_vs=$(echo "$vs_yaml" | yq eval 'del(.spec.http[0].fault)')
   updated_vs=$(echo "$updated_vs" | yq eval ".spec.http[0].match[0].uri.prefix = \"$rule_path\"")
-  updated_vs=$(echo "$updated_vs" | yq eval ".spec.http[0].route[0].destination.host = \"${service_name}.${K8S_NAMESPACE}.svc.cluster.local\"")
-  updated_vs=$(echo "$updated_vs" | yq eval ".spec.http[0].route[0].destination.port.number = $service_port")
+
+  # Check if there's blue/green configuration
+  if [[ "$blue_green_config" != "null" && -n "$blue_green_config" ]]; then
+    # Parse blue/green destinations and weights
+    local blue_weight green_weight blue_service green_service
+
+    blue_weight=$(echo "$blue_green_config" | jq -r '.forward.targetGroups[0].weight // 100')
+    green_weight=$(echo "$blue_green_config" | jq -r '.forward.targetGroups[1].weight // 0')
+    blue_service=$(echo "$blue_green_config" | jq -r '.forward.targetGroups[0].serviceName')
+    green_service=$(echo "$blue_green_config" | jq -r '.forward.targetGroups[1].serviceName')
+
+    # Set blue destination
+    updated_vs=$(echo "$updated_vs" | yq eval ".spec.http[0].route[0].destination.host = \"${blue_service}.${K8S_NAMESPACE}.svc.cluster.local\"")
+    updated_vs=$(echo "$updated_vs" | yq eval ".spec.http[0].route[0].destination.port.number = $service_port")
+    updated_vs=$(echo "$updated_vs" | yq eval ".spec.http[0].route[0].weight = $blue_weight")
+
+    # Add green destination
+    updated_vs=$(echo "$updated_vs" | yq eval ".spec.http[0].route += [{\"destination\": {\"host\": \"${green_service}.${K8S_NAMESPACE}.svc.cluster.local\", \"port\": {\"number\": $service_port}}, \"weight\": $green_weight}]")
+  else
+    # Single destination
+    updated_vs=$(echo "$updated_vs" | yq eval ".spec.http[0].route[0].destination.host = \"${service_name}.${K8S_NAMESPACE}.svc.cluster.local\"")
+    updated_vs=$(echo "$updated_vs" | yq eval ".spec.http[0].route[0].destination.port.number = $service_port")
+  fi
 
   echo "$updated_vs"
 }
@@ -105,13 +179,14 @@ replace_existing_route() {
   local vs_yaml="$1"
   local rule_path="$2"
   local service_json="$3"
-  local route_index="$4"
+  local blue_green_config="$4"
+  local route_index="$5"
 
   local updated_vs
   local new_route
 
   # Create the new route
-  new_route=$(create_http_route "$rule_path" "$service_json")
+  new_route=$(create_http_route "$rule_path" "$service_json" "$blue_green_config")
 
   # Replace the existing route at the found index
   updated_vs=$(echo "$vs_yaml" | yq eval -o=json '.' | \
@@ -125,12 +200,13 @@ add_new_route() {
   local vs_yaml="$1"
   local rule_path="$2"
   local service_json="$3"
+  local blue_green_config="$4"
 
   local updated_vs
   local new_route
 
   # Create the new http route
-  new_route=$(create_http_route "$rule_path" "$service_json")
+  new_route=$(create_http_route "$rule_path" "$service_json" "$blue_green_config")
 
   # Add the new route to the existing http array
   updated_vs=$(echo "$vs_yaml" | yq eval ".spec.http += [$new_route]")
@@ -143,6 +219,8 @@ VS_NAME=$(kubectl get virtualservice -n "$K8S_NAMESPACE" -l "service_id=$SERVICE
 
 VIRTUALSERVICE=$(kubectl get virtualservice -n "$K8S_NAMESPACE" "$VS_NAME" -o yaml)
 
+# Extract blue/green annotation and service from SCOPE_RULE (similar to ALB version)
+BLUE_GREEN_CONFIG=$(echo "$SCOPE_RULE" | jq -r '.blue_green_annotation // "null"')
 SERVICE=$(echo "$SCOPE_RULE" | jq .service)
 
 # Define output file
@@ -153,18 +231,18 @@ mkdir -p "$OUTPUT_DIR"
 
 # Use case 1 - empty virtualservice
 if [[ "$(is_virtualservice_empty "$VIRTUALSERVICE")" == "true" ]]; then
-  UPDATED_VS=$(update_virtualservice_route "$VIRTUALSERVICE" "$RULE_PATH" "$SERVICE")
+  UPDATED_VS=$(update_virtualservice_route "$VIRTUALSERVICE" "$RULE_PATH" "$SERVICE" "$BLUE_GREEN_CONFIG")
   echo "$UPDATED_VS" | yq "." > "$VS_FILE"
 else
   ROUTE_INDEX=$(find_route_index "$VIRTUALSERVICE" "$RULE_PATH")
 
   # if there is a route for the path we replace it
   if [[ "$ROUTE_INDEX" != "-1" ]]; then
-    UPDATED_VS=$(replace_existing_route "$VIRTUALSERVICE" "$RULE_PATH" "$SERVICE" "$ROUTE_INDEX")
+    UPDATED_VS=$(replace_existing_route "$VIRTUALSERVICE" "$RULE_PATH" "$SERVICE" "$BLUE_GREEN_CONFIG" "$ROUTE_INDEX")
     echo "$UPDATED_VS" | yq "." > "$VS_FILE"
   else
     # if there is no route for the path we add a new one
-    UPDATED_VS=$(add_new_route "$VIRTUALSERVICE" "$RULE_PATH" "$SERVICE")
+    UPDATED_VS=$(add_new_route "$VIRTUALSERVICE" "$RULE_PATH" "$SERVICE" "$BLUE_GREEN_CONFIG")
     echo "$UPDATED_VS" | yq "." > "$VS_FILE"
   fi
 fi
