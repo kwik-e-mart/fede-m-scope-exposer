@@ -7,7 +7,6 @@ metadata:
     nullplatform: "true"
     service: {{ .service.slug }}
     service_id: {{ .service.id }}
-    scope_id: {{ .}}
 spec:
   hosts:
     - {{ .parameters.domain }}
