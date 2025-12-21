@@ -26,22 +26,34 @@ if [[ "$IN_PROGRESS_DEPLOYMENT" != "null" ]]; then
     echo "DEBUG: SWITCHED_TRAFFIC=$SWITCHED_TRAFFIC"
 fi
 
-# Get services with scope_id label
-echo "DEBUG: Fetching services..."
-SERVICES_JSON=$(kubectl get services -n "$K8S_NAMESPACE" -l "scope_id=$SCOPE_ID" -o json 2>&1)
+# Get all services and filter by scope_id in selector
+# Note: kubectl -l only filters by labels, not by selectors. scope_id is in the selector field.
+echo "DEBUG: Fetching all services from namespace..."
+ALL_SERVICES=$(kubectl get services -n "$K8S_NAMESPACE" -o json 2>&1)
 
 # Try to sanitize the JSON by removing any control characters or ANSI escape codes
 echo "DEBUG: Sanitizing JSON output..."
-SERVICES_JSON_CLEAN=$(echo "$SERVICES_JSON" | sed $'s/\x1b\\[[0-9;]*m//g' | tr -d '\000-\011\013-\037')
-echo "DEBUG: Cleaned JSON length: ${#SERVICES_JSON_CLEAN} characters"
+ALL_SERVICES_CLEAN=$(echo "$ALL_SERVICES" | sed $'s/\x1b\\[[0-9;]*m//g' | tr -d '\000-\011\013-\037')
+echo "DEBUG: Cleaned JSON length: ${#ALL_SERVICES_CLEAN} characters"
 
 # Check if we have valid JSON
-if echo "$SERVICES_JSON_CLEAN" | jq empty 2>/dev/null; then
+if echo "$ALL_SERVICES_CLEAN" | jq empty 2>/dev/null; then
     echo "DEBUG: JSON is valid after cleaning"
-    SERVICES_JSON="$SERVICES_JSON_CLEAN"
+    ALL_SERVICES="$ALL_SERVICES_CLEAN"
 else
     echo "DEBUG: WARNING - JSON may still have issues, attempting to parse anyway"
+    ALL_SERVICES="$ALL_SERVICES_CLEAN"
 fi
+
+# Filter services by scope_id in selector (not label)
+echo "DEBUG: Filtering services with scope_id=$SCOPE_ID in selector..."
+SERVICES_JSON=$(echo "$ALL_SERVICES" | jq --arg scope_id "$SCOPE_ID" '{
+  apiVersion: .apiVersion,
+  kind: .kind,
+  metadata: .metadata,
+  items: [.items[] | select(.spec.selector.scope_id == $scope_id)]
+}')
+echo "DEBUG: Filtered services JSON"
 
 NUM_SERVICES=$(echo "$SERVICES_JSON" | jq '.items | length')
 echo "DEBUG: NUM_SERVICES=$NUM_SERVICES"
