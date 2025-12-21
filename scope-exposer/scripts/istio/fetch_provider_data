@@ -12,7 +12,7 @@ else
   PROVIDER_DATA=$(np provider list --categories container-orchestration --nrn "$NRN" --dimensions "$DIMENSION_FILTER" --format json | jq -r ".results[0]")
 fi
 
-K8S_NAMESPACE=$(echo "$PROVIDER_DATA" | jq -r .attributes.cluster.namespace)
+# K8S_NAMESPACE=$(echo "$PROVIDER_DATA" | jq -r .attributes.cluster.namespace)
 
 ALB_NAME=$(echo "$PROVIDER_DATA" | jq -r --arg default "k8s-nullplatform-internet-facing" '
   .attributes.balancer.public_name // $default
