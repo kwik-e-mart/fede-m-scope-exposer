@@ -2,21 +2,21 @@
 
 set -euo pipefail
 
-SERVICE_DOMAIN=$(echo "$CONTEXT" | jq -r .parameters.domain)
+SERVICE_DOMAIN=$(echo "$CONTEXT" | jq -r '.parameters.domain // .service.attributes.domain')
 
-echo "Creating VirtualService for service $SERVICE_NAME with domain $SERVICE_DOMAIN"
+echo "Creating HTTPRoute for service $SERVICE_NAME with domain $SERVICE_DOMAIN"
 
-echo "Creating public VirtualService..."
+echo "Creating public HTTPRoute..."
 
-VS_FILE="$OUTPUT_DIR/virtualservice-$SERVICE_ID-public.yaml"
+HTTPROUTE_FILE="$OUTPUT_DIR/httproute-$SERVICE_ID-public.yaml"
 CONTEXT_PATH="$OUTPUT_DIR/context-$SERVICE_ID.json"
 
 echo "$CONTEXT" > "$CONTEXT_PATH"
 
-echo "Building Template: $TEMPLATE to $VS_FILE"
+echo "Building Template: $TEMPLATE to $HTTPROUTE_FILE"
 
 gomplate -c .="$CONTEXT_PATH" \
   --file "$TEMPLATE" \
-  --out "$VS_FILE"
+  --out "$HTTPROUTE_FILE"
 
 rm "$CONTEXT_PATH"

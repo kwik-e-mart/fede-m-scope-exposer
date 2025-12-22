@@ -1,7 +1,7 @@
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: {{ .service.slug }}-route
+  name: {{ .service.slug }}-{{ .service.id }}-route
   namespace: {{ .k8s_namespace }}
   labels:
     nullplatform: "true"
