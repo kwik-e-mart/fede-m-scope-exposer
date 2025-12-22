@@ -27,15 +27,22 @@ steps:
         type: environment
       - name: RULE_PATH
         type: environment
-  - name: "build template"
+  - name: "build httproute"
     type: script
     file: "$SERVICE_PATH/scripts/istio/build_ingress"
     configuration:
       TEMPLATE: "$SERVICE_PATH/templates/istio/empty.yaml.tpl"
     output:
-      - name: VS_FILE
+      - name: HTTPROUTE_FILE
         type: file
-        file: "$OUTPUT_DIR/virtualservice-$SERVICE_ID-$SCOPE_ID-public.yaml"
+        file: "$OUTPUT_DIR/httproute-$SERVICE_ID-public.yaml"
+  - name: "build dns endpoint"
+    type: script
+    file: "$SERVICE_PATH/scripts/istio/build_dns_endpoint"
+    output:
+      - name: DNS_FILE
+        type: file
+        file: "$OUTPUT_DIR/dnsendpoint-$SERVICE_ID-public.yaml"
   - name: apply
     type: script
     file: "$SERVICE_PATH/scripts/istio/apply"

@@ -42,9 +42,9 @@ steps:
     type: script
     file: "$SERVICE_PATH/scripts/istio/build_ingress_with_rule"
     output:
-      - name: VS_FILE
+      - name: HTTPROUTE_FILE
         type: file
-        file: "$OUTPUT_DIR/virtualservice-$SERVICE_ID-$SCOPE_ID-public.yaml"
+        file: "$OUTPUT_DIR/httproute-$SERVICE_ID-$SCOPE_ID-public.yaml"
   - name: apply
     type: script
     file: "$SERVICE_PATH/scripts/istio/apply"

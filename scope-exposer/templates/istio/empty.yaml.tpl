@@ -1,28 +1,24 @@
-apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
 metadata:
-  name: vs-{{ .service.slug }}-{{ .service.id }}-public
+  name: {{ .service.slug }}-route
   namespace: {{ .k8s_namespace }}
   labels:
     nullplatform: "true"
     service: {{ .service.slug }}
     service_id: {{ .service.id }}
 spec:
-  hosts:
-    - {{ .parameters.domain }}
-  gateways:
-    - istio-ingress/api-gateway
-  http:
-    - match:
-        - uri:
-            prefix: /
-      fault:
-        abort:
-          percentage:
-            value: 100
-          httpStatus: 404
-      route:
-        - destination:
-            host: response-404.{{ .k8s_namespace }}.svc.cluster.local
-            port:
-              number: 80
+  parentRefs:
+    - name: gateway-public
+      namespace: gateways
+  hostnames:
+    - {{ if has . "parameters" }}{{ if has .parameters "domain" }}{{ .parameters.domain }}{{ else }}{{ .service.attributes.domain }}{{ end }}{{ else }}{{ .service.attributes.domain }}{{ end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: response-404
+          port: 80
+          weight: 0
