@@ -1,0 +1,4 @@
+application_name,environment,group_name
+bpaas-service,qa,karpetner-qa-node-group
+bpaas-service,prod,karpetner-prod-node-group
+bpaas-service-2,prod,karpetner-prod-node-group

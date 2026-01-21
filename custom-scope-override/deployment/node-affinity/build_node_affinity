@@ -1,0 +1,43 @@
+#!/bin/bash
+
+APPLICATION_SLUG=$(echo "$CONTEXT" | jq -r .application.slug)
+SCOPE_ENVIRONMENT=$(echo "$CONTEXT" | jq -r .scope.dimensions.environment)
+
+MAPPING_FILE="$OVERRIDES_PATH/deployment/node-affinity/mapping.csv"
+
+GROUP_NAME=$(awk -F',' -v application_name="$APPLICATION_SLUG" -v environment="$SCOPE_ENVIRONMENT" '
+    NR==1 { next }  # Skip header
+    $1 == application_name && $2 == environment { print $3; exit }
+' "$MAPPING_FILE")
+
+if [[ -z "$GROUP_NAME" ]]; then
+    echo "No node-affinity configuration. Skipping node group setup"
+    return
+fi
+
+for deployment_file in "$OUTPUT_DIR"/deployment-*.yaml; do
+    if [ -f "$deployment_file" ]; then
+        kind=$(yq eval '.kind' "$deployment_file")
+        echo "Processing: $deployment_file of kind $kind"
+
+        new_expression='{
+            "key": "eks.amazonaws.com/nodegroup",
+            "operator": "In",
+            "values": ["'"$GROUP_NAME"'"]
+        }'
+
+        if [ "$kind" = "CronJob" ]; then
+            affinity_path=".spec.jobTemplate.spec.affinity"
+        else
+            affinity_path=".spec.template.spec.affinity"
+        fi
+
+        existing=$(yq eval "$affinity_path.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[] | select(.key == \"eks.amazonaws.com/nodegroup\")" "$deployment_file")
+
+        if [ -n "$existing" ]; then
+            yq eval -i "($affinity_path.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[] | select(.key == \"eks.amazonaws.com/nodegroup\").values) = [\"$GROUP_NAME\"]" "$deployment_file"
+        else
+            yq eval -i "$affinity_path.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions += [$new_expression]" "$deployment_file"
+        fi
+    fi
+done
