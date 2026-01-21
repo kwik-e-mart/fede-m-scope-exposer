@@ -27,6 +27,9 @@ steps:
         type: environment
       - name: RULE_PATH
         type: environment
+  - name: "set_domain_in_service"
+    type: script
+    file: "$SERVICE_PATH/scripts/set_domain_in_service"
   - name: "build template"
     type: script
     file: "$SERVICE_PATH/scripts/build_ingress"
@@ -42,3 +45,9 @@ steps:
     configuration:
       ACTION: apply
       DRY_RUN: false
+    post:
+      name: wait ingress_reconciliation
+      type: script
+      file: "$SERVICE_PATH/scripts/verify_ingress_reconciliation"
+      configuration:
+        IS_SERVICE_CREATION: true

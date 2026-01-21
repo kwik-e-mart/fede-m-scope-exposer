@@ -1,0 +1,8 @@
+#!/bin/bash
+
+EXPOSER_DOMAIN=$(echo "$CONTEXT" | jq -r .parameters.domain)
+SERVICE_ID=$(echo "$CONTEXT" | jq -r .service.id)
+
+echo "🔧 Setting domain in service attributes..."
+
+np service patch --id "$SERVICE_ID" --body "{\"attributes\": {\"domain\": \"$EXPOSER_DOMAIN\"}}"

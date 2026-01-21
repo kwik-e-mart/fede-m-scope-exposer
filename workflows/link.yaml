@@ -49,6 +49,12 @@ steps:
     configuration:
       ACTION: apply
       DRY_RUN: false
+    post:
+      name: wait ingress_reconciliation
+      type: script
+      file: "$SERVICE_PATH/scripts/verify_ingress_reconciliation"
+      configuration:
+        IS_SERVICE_CREATION: false
   - name: "add_rule_to_service"
     type: script
     file: "$SERVICE_PATH/scripts/update_service"
