@@ -2,13 +2,20 @@
   "assignable_to": "dimension",
   "attributes": {
     "schema": {
+      "type": "object",
+      "required": [
+        "visibility",
+        "domain"
+      ],
       "properties": {
-        "domain": {
-          "type": "string",
-          "editableOn": []
-        },
         "rules": {
+          "type": "array",
           "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "scope"
+            ],
             "properties": {
               "path": {
                 "type": "string"
@@ -16,23 +23,35 @@
               "scope": {
                 "type": "string"
               }
-            },
-            "required": [
-              "path",
-              "scope"
-            ],
-            "type": "object"
+            }
           },
-          "type": "array",
+          "order": 2,
           "visibleOn": [
             "read"
           ]
+        },
+        "domain": {
+          "type": "string"
+        },
+        "visibility": {
+          "type": "string",
+          "oneOf": [
+            {
+              "const": "internet-facing",
+              "title": "Internet facing"
+            },
+            {
+              "const": "internal",
+              "title": "Internal"
+            }
+          ],
+          "order": 1,
+          "default": "internet-facing",
+          "editableOn": [
+            "create"
+          ]
         }
-      },
-      "required": [
-        "domain"
-      ],
-      "type": "object"
+      }
     },
     "values": {}
   },

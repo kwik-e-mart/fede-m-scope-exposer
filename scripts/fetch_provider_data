@@ -18,5 +18,14 @@ ALB_NAME=$(echo "$PROVIDER_DATA" | jq -r --arg default "k8s-nullplatform-interne
   .attributes.balancer.public_name // $default
 ')
 
+VISIBILITY=$(echo "$CONTEXT" | jq -r --arg default "internet-facing" '.parameters.visibility // .service.attributes.visibility // $default')
+
+if [ "$VISIBILITY" = "internet-facing" ]; then
+  ALB_NAME=$(echo "$PROVIDER_DATA" | jq -r --arg default "k8s-nullplatform-internet-facing" '.attributes.balancer.public_name // $default')
+else
+  ALB_NAME=$(echo "$PROVIDER_DATA" | jq -r --arg default "k8s-nullplatform-internal" '.attributes.balancer.balancer.private_name // $default')
+fi
+
 export K8S_NAMESPACE
 export ALB_NAME
+export VISIBILITY
