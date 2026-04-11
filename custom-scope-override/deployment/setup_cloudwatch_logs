@@ -2,7 +2,7 @@
 
 ENVIRONMENT=$(echo "$CONTEXT" | jq -r .scope.dimensions.environment)
 
-  HAS_APP_NAME=$(echo "$CONTEXT" | jq -r '(.parameters.results // [])[] | select(.name == "APP_NAME") | .values[0].value // "not_set"' | head -n 1)
+HAS_APP_NAME=$(echo "$CONTEXT" | jq -r '(.parameters.results // [])[] | select(.name == "APP_NAME") | .values[0].value // "not_set"' | head -n 1)
 HAS_APP_NAME=${HAS_APP_NAME:-not_set}
 
 CONFIGMAP_NAME="fluent-bit-config"
@@ -122,5 +122,5 @@ EOF
         fi
     done
 else
-    echo "Skipping cloudwatch logs configuration for Environment=$ENVIRONMENT, Cluster=$CLUSTER_NAME. Parameters present: APP_NAME=$HAS_APP_NAME, AWS_ROLE_ARN=$HAS_ROLE"
+    echo "Skipping cloudwatch logs configuration for Environment=$ENVIRONMENT, Cluster=$CLUSTER_NAME. Parameters present: APP_NAME=$HAS_APP_NAME, AWS_ROLE_ARN=$ROLE_ARN"
 fi
