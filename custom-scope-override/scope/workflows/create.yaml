@@ -3,3 +3,10 @@ steps:
     type: script
     file: "$OVERRIDES_PATH/scope/iam/import_aws_role"
     before: iam
+  - name: networking
+    type: workflow
+    steps:
+      - name: generate_disaster_recovery_domain
+        type: script
+        file: "$OVERRIDES_PATH/scope/disaster_recovery/generate_disaster_recovery_domain"
+        after: generate domain

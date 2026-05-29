@@ -1,0 +1,64 @@
+#!/bin/bash
+
+SITE=$(echo "$CONTEXT" | jq -r '.scope.dimensions.site // "aws-main"')
+
+if [[ "$SITE" != "aws-dr" ]]; then
+  echo "ℹ️  Site dimension is '$SITE' (not 'aws-dr'). Skipping disaster recovery domain generation."
+  return
+fi
+
+echo "🔍 Disaster recovery scope detected (site: $SITE). Resolving main domain..."
+
+SCOPE_SLUG=$(echo "$CONTEXT" | jq -r '.scope.slug')
+MAIN_SCOPE_SLUG="${SCOPE_SLUG%-recovery}"
+
+APPLICATION_ID=$(echo "$CONTEXT" | jq -r '.application.id')
+SCOPE_ID=$(echo "$CONTEXT" | jq -r '.scope.id')
+
+echo "📋 DR scope: $SCOPE_SLUG (id: $SCOPE_ID) | Main scope slug: $MAIN_SCOPE_SLUG | Application: $APPLICATION_ID"
+
+echo "📡 Looking up main scope '$MAIN_SCOPE_SLUG'..."
+if ! MAIN_SCOPE=$(np scope list \
+  --application_id "$APPLICATION_ID" \
+  --status "active,stopped" \
+  --format json 2>&1); then
+  echo "❌ Failed to list scopes for application '$APPLICATION_ID'" >&2
+  echo "💡 Possible causes:" >&2
+  echo "   - The nullplatform CLI is not authenticated in this environment" >&2
+  echo "   - The application id '$APPLICATION_ID' is incorrect" >&2
+  echo "🔧 How to fix:" >&2
+  echo "   - Verify CLI auth and retry: np scope list --application_id $APPLICATION_ID" >&2
+  echo "   - CLI error: $MAIN_SCOPE" >&2
+  exit 1
+fi
+
+SCOPE_DOMAIN=$(echo "$MAIN_SCOPE" | jq -r --arg slug "$MAIN_SCOPE_SLUG" \
+  'first(.results[] | select(.slug == $slug) | .domain) // empty')
+
+if [[ -z "$SCOPE_DOMAIN" ]]; then
+  echo "❌ No main scope found for slug '$MAIN_SCOPE_SLUG' (application: $APPLICATION_ID)" >&2
+  echo "💡 Possible causes:" >&2
+  echo "   - The main scope '$MAIN_SCOPE_SLUG' has not been created yet" >&2
+  echo "   - A disaster recovery scope cannot exist without its main counterpart," >&2
+  echo "     since it must inherit the main domain to take over traffic on failover" >&2
+  echo "🔧 How to fix:" >&2
+  echo "   - Create the main scope '$MAIN_SCOPE_SLUG' first, then create this recovery scope" >&2
+  exit 1
+fi
+
+echo "✅ Main domain resolved: $SCOPE_DOMAIN"
+
+echo "📝 Patching DR scope '$SCOPE_ID' with domain '$SCOPE_DOMAIN'..."
+if ! np scope patch --id "$SCOPE_ID" --body "{\"domain\":\"$SCOPE_DOMAIN\"}"; then
+  echo "❌ Failed to patch scope '$SCOPE_ID' with domain '$SCOPE_DOMAIN'" >&2
+  echo "💡 Possible causes:" >&2
+  echo "   - The scope id '$SCOPE_ID' is incorrect or the scope was deleted" >&2
+  echo "   - The CLI lacks permissions to patch this scope" >&2
+  echo "🔧 How to fix:" >&2
+  echo "   - Verify the scope exists: np scope read --id $SCOPE_ID" >&2
+  exit 1
+fi
+
+echo "✨ Disaster recovery scope '$SCOPE_SLUG' now serves domain '$SCOPE_DOMAIN'"
+
+export SCOPE_DOMAIN
