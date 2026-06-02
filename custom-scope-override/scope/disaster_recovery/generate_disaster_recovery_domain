@@ -9,8 +9,10 @@ fi
 
 echo "🔍 Disaster recovery scope detected (site: $SITE). Resolving main domain..."
 
+RECOVERY_SCOPE_SUFFIX=${RECOVERY_SCOPE_SUFFIX:-"-recovery"}
+
 SCOPE_SLUG=$(echo "$CONTEXT" | jq -r '.scope.slug')
-MAIN_SCOPE_SLUG="${SCOPE_SLUG%-recovery}"
+MAIN_SCOPE_SLUG="${SCOPE_SLUG%"$RECOVERY_SCOPE_SUFFIX"}"
 
 APPLICATION_ID=$(echo "$CONTEXT" | jq -r '.application.id')
 SCOPE_ID=$(echo "$CONTEXT" | jq -r '.scope.id')
