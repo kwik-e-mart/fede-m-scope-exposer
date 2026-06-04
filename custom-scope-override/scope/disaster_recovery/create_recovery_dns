@@ -1,0 +1,21 @@
+#!/bin/bash
+
+if [[ "$SITE" != "aws-dr" ]]; then
+  echo "ℹ️  Site dimension is '$SITE' (not 'aws-dr'). Skipping disaster recovery domain generation."
+  return
+fi
+
+echo "🔍 Disaster recovery scope detected (site: $SITE). Creating dns record: $RECOVERY_DOMAIN..."
+
+MAIN_DOMAIN="$SCOPE_DOMAIN"
+SCOPE_DOMAIN="$RECOVERY_DOMAIN"
+
+export SCOPE_DOMAIN
+
+source "$SERVICE_PATH/scope/networking/dns/manage_dns"
+
+echo "✅ Recovery dns created: $RECOVERY_DOMAIN"
+
+SCOPE_DOMAIN="$MAIN_DOMAIN"
+
+export SCOPE_DOMAIN

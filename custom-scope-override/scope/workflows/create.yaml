@@ -10,3 +10,23 @@ steps:
         type: script
         file: "$OVERRIDES_PATH/scope/disaster_recovery/generate_disaster_recovery_domain"
         after: generate domain
+        output:
+          - name: SCOPE_DOMAIN
+            type: environment
+          - name: RECOVERY_DOMAIN
+            type: environment
+      - name: create_recovery_dns
+        type: script
+        file: "$OVERRIDES_PATH/scope/disaster_recovery/create_recovery_dns"
+        after: generate_disaster_recovery_domain
+        configuration:
+          ACTION: CREATE
+        pre:
+          name: build_recovery_dns_context
+          type: script
+          file: "$SERVICE_PATH/scope/networking/dns/build_dns_context"
+          output:
+            - name: HOSTED_PUBLIC_ZONE_ID
+              type: environment
+            - name: HOSTED_PRIVATE_ZONE_ID
+              type: environment
