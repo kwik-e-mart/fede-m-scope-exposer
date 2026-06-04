@@ -63,4 +63,7 @@ fi
 
 echo "✨ Disaster recovery scope '$SCOPE_SLUG' now serves domain '$SCOPE_DOMAIN'"
 
+RECOVERY_DOMAIN="recovery-$SCOPE_DOMAIN"
+
 export SCOPE_DOMAIN
+export RECOVERY_DOMAIN
