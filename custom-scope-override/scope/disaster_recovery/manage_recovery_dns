@@ -1,5 +1,8 @@
 #!/bin/bash
 
+SITE=$(echo "$CONTEXT" | jq -r '.scope.dimensions.site // "aws-main"')
+RECOVERY_DOMAIN="recovery-$SCOPE_DOMAIN"
+
 if [[ "$SITE" != "aws-dr" ]]; then
   echo "ℹ️  Site dimension is '$SITE' (not 'aws-dr'). Skipping disaster recovery domain generation."
   return

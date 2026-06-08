@@ -15,9 +15,9 @@ steps:
             type: environment
           - name: RECOVERY_DOMAIN
             type: environment
-      - name: create_recovery_dns
+      - name: manage_recovery_dns
         type: script
-        file: "$OVERRIDES_PATH/scope/disaster_recovery/create_recovery_dns"
+        file: "$OVERRIDES_PATH/scope/disaster_recovery/manage_recovery_dns"
         after: generate_disaster_recovery_domain
         configuration:
           ACTION: CREATE
