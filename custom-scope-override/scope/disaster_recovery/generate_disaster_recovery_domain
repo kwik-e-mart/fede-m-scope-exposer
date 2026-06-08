@@ -65,5 +65,22 @@ echo "✨ Disaster recovery scope '$SCOPE_SLUG' now serves domain '$SCOPE_DOMAIN
 
 RECOVERY_DOMAIN="recovery-$SCOPE_DOMAIN"
 
+DOMAIN_BODY=$(jq -n \
+  --argjson scope_id "$SCOPE_ID" \
+  --arg name "$RECOVERY_DOMAIN" \
+  '{scope_id: $scope_id, name: $name, type: "scope"}')
+
+echo "📝 Creating recovery domain '$RECOVERY_DOMAIN' for scope '$SCOPE_ID'..."
+if ! np scope domain create --body "$DOMAIN_BODY"; then
+  echo "❌ Failed to create recovery domain '$RECOVERY_DOMAIN' for scope '$SCOPE_ID'" >&2
+  echo "💡 Possible causes:" >&2
+  echo "   - A domain named '$RECOVERY_DOMAIN' may already exist for this (or other) scope" >&2
+  echo "🔧 How to fix:" >&2
+  echo "   - List existing domains: np scope domain list --all --organization_id $ORGANIZATION_ID" >&2
+  exit 1
+fi
+
+echo "✅ Recovery domain '$RECOVERY_DOMAIN' created for scope '$SCOPE_ID'"
+
 export SCOPE_DOMAIN
 export RECOVERY_DOMAIN
