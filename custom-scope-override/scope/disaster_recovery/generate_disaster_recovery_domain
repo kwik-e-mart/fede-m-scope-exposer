@@ -63,12 +63,41 @@ fi
 
 echo "✨ Disaster recovery scope '$SCOPE_SLUG' now serves domain '$SCOPE_DOMAIN'"
 
-RECOVERY_DOMAIN="recovery-$SCOPE_DOMAIN"
+# Build the recovery domain by prefixing "recovery-" onto the first DNS label
+# of the scope domain, then re-truncating so that label stays within the 63-char
+# DNS limit (mirrors the len-57 truncation logic in networking/dns/domain/domain-generate).
+RECOVERY_LABEL_MAX_LENGTH=63
+
+SCOPE_DOMAIN_FIRST_LABEL="${SCOPE_DOMAIN%%.*}"
+SCOPE_DOMAIN_REST="${SCOPE_DOMAIN#*.}"
+
+RECOVERY_LABEL="recovery-${SCOPE_DOMAIN_FIRST_LABEL}"
+if [[ ${#RECOVERY_LABEL} -gt $RECOVERY_LABEL_MAX_LENGTH ]]; then
+  RECOVERY_LABEL="${RECOVERY_LABEL:0:$RECOVERY_LABEL_MAX_LENGTH}"
+fi
+# Strip any trailing dashes/dots left by truncation so the label stays valid
+RECOVERY_LABEL=$(echo "$RECOVERY_LABEL" | sed 's/[-.]*$//')
+
+RECOVERY_DOMAIN="${RECOVERY_LABEL}.${SCOPE_DOMAIN_REST}"
 
 DOMAIN_BODY=$(jq -n \
   --argjson scope_id "$SCOPE_ID" \
   --arg name "$RECOVERY_DOMAIN" \
   '{scope_id: $scope_id, name: $name, type: "scope"}')
+
+echo "🔍 Checking whether recovery domain '$RECOVERY_DOMAIN' already exists for scope '$SCOPE_ID'..."
+if EXISTING_DOMAINS=$(np scope domain list --scope_id "$SCOPE_ID" --name "$RECOVERY_DOMAIN" --format json 2>&1); then
+  if echo "$EXISTING_DOMAINS" | jq -e --arg name "$RECOVERY_DOMAIN" \
+    'any(.results[]?; .name == $name)' >/dev/null 2>&1; then
+    echo "ℹ️  Recovery domain '$RECOVERY_DOMAIN' already exists for scope '$SCOPE_ID'. Skipping creation."
+    export SCOPE_DOMAIN
+    export RECOVERY_DOMAIN
+    return
+  fi
+else
+  echo "⚠️  Could not verify existing domains for scope '$SCOPE_ID'; will attempt creation anyway." >&2
+  echo "   - CLI error: $EXISTING_DOMAINS" >&2
+fi
 
 echo "📝 Creating recovery domain '$RECOVERY_DOMAIN' for scope '$SCOPE_ID'..."
 if ! np scope domain create --body "$DOMAIN_BODY"; then
