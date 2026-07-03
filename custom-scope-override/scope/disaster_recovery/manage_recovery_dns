@@ -1,7 +1,25 @@
 #!/bin/bash
 
 SITE=$(echo "$CONTEXT" | jq -r '.scope.dimensions.site // "aws-main"')
-RECOVERY_DOMAIN="recovery-$SCOPE_DOMAIN"
+
+# Build the recovery domain by prefixing "recovery-" onto the first DNS label
+# of the scope domain, then re-truncating so that label stays within the 63-char
+# DNS limit (mirrors the len-57 truncation logic in networking/dns/domain/domain-generate).
+# Must match the construction in generate_disaster_recovery_domain so the DNS
+# record lines up with the registered recovery domain.
+RECOVERY_LABEL_MAX_LENGTH=63
+
+SCOPE_DOMAIN_FIRST_LABEL="${SCOPE_DOMAIN%%.*}"
+SCOPE_DOMAIN_REST="${SCOPE_DOMAIN#*.}"
+
+RECOVERY_LABEL="recovery-${SCOPE_DOMAIN_FIRST_LABEL}"
+if [[ ${#RECOVERY_LABEL} -gt $RECOVERY_LABEL_MAX_LENGTH ]]; then
+  RECOVERY_LABEL="${RECOVERY_LABEL:0:$RECOVERY_LABEL_MAX_LENGTH}"
+fi
+# Strip any trailing dashes/dots left by truncation so the label stays valid
+RECOVERY_LABEL=$(echo "$RECOVERY_LABEL" | sed 's/[-.]*$//')
+
+RECOVERY_DOMAIN="${RECOVERY_LABEL}.${SCOPE_DOMAIN_REST}"
 
 if [[ "$SITE" != "aws-dr" ]]; then
   echo "ℹ️  Site dimension is '$SITE' (not 'aws-dr'). Skipping disaster recovery domain generation."

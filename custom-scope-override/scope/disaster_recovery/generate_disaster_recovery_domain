@@ -86,7 +86,7 @@ DOMAIN_BODY=$(jq -n \
   '{scope_id: $scope_id, name: $name, type: "scope"}')
 
 echo "🔍 Checking whether recovery domain '$RECOVERY_DOMAIN' already exists for scope '$SCOPE_ID'..."
-if EXISTING_DOMAINS=$(np scope domain list --scope_id "$SCOPE_ID" --name "$RECOVERY_DOMAIN" --format json 2>&1); then
+if EXISTING_DOMAINS=$(np scope domain list --organization_id "$ORGANIZATION_ID" --scope_id "$SCOPE_ID" --name "$RECOVERY_DOMAIN" --format json 2>&1); then
   if echo "$EXISTING_DOMAINS" | jq -e --arg name "$RECOVERY_DOMAIN" \
     'any(.results[]?; .name == $name)' >/dev/null 2>&1; then
     echo "ℹ️  Recovery domain '$RECOVERY_DOMAIN' already exists for scope '$SCOPE_ID'. Skipping creation."
