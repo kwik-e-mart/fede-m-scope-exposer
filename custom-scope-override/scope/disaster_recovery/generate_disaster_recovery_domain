@@ -14,10 +14,24 @@ RECOVERY_SCOPE_SUFFIX=${RECOVERY_SCOPE_SUFFIX:-"recovery"}
 SCOPE_SLUG=$(echo "$CONTEXT" | jq -r '.scope.slug')
 MAIN_SCOPE_SLUG="${SCOPE_SLUG%-"$RECOVERY_SCOPE_SUFFIX"}"
 
+# Scope slugs are immutable, but a scope's display name can change after creation.
+# Derive the main scope name from the DR scope name by stripping the recovery
+# suffix (tolerating a dash or space separator, case-insensitive) so we can fall
+# back to a name match when the immutable slug no longer lines up (renamed scope).
+SCOPE_NAME=$(echo "$CONTEXT" | jq -r '.scope.name // empty')
+MAIN_SCOPE_NAME="$SCOPE_NAME"
+if [[ -n "$SCOPE_NAME" ]]; then
+  shopt -s nocasematch
+  if [[ "$SCOPE_NAME" =~ ^(.*[^[:space:]-])[[:space:]-]+"$RECOVERY_SCOPE_SUFFIX"$ ]]; then
+    MAIN_SCOPE_NAME="${BASH_REMATCH[1]}"
+  fi
+  shopt -u nocasematch
+fi
+
 APPLICATION_ID=$(echo "$CONTEXT" | jq -r '.application.id')
 SCOPE_ID=$(echo "$CONTEXT" | jq -r '.scope.id')
 
-echo "📋 DR scope: $SCOPE_SLUG (id: $SCOPE_ID) | Main scope slug: $MAIN_SCOPE_SLUG | Application: $APPLICATION_ID"
+echo "📋 DR scope: $SCOPE_SLUG (id: $SCOPE_ID) | Main scope slug: $MAIN_SCOPE_SLUG | Main scope name: $MAIN_SCOPE_NAME | Application: $APPLICATION_ID"
 
 echo "📡 Looking up main scope '$MAIN_SCOPE_SLUG'..."
 if ! MAIN_SCOPE=$(np scope list \
@@ -34,11 +48,20 @@ if ! MAIN_SCOPE=$(np scope list \
   exit 1
 fi
 
+# 1) Prefer an exact slug match: fast path, unaffected by display-name changes.
 SCOPE_DOMAIN=$(echo "$MAIN_SCOPE" | jq -r --arg slug "$MAIN_SCOPE_SLUG" \
   'first(.results[] | select(.slug == $slug) | .domain) // empty')
 
+# 2) Fall back to an exact name match. Covers main scopes renamed after creation,
+#    whose immutable slug no longer matches the slug derived from the DR scope.
+if [[ -z "$SCOPE_DOMAIN" && -n "$MAIN_SCOPE_NAME" ]]; then
+  echo "ℹ️  No scope matched slug '$MAIN_SCOPE_SLUG'; trying exact name match '$MAIN_SCOPE_NAME'..."
+  SCOPE_DOMAIN=$(echo "$MAIN_SCOPE" | jq -r --arg name "$MAIN_SCOPE_NAME" \
+    'first(.results[] | select(.name == $name) | .domain) // empty')
+fi
+
 if [[ -z "$SCOPE_DOMAIN" ]]; then
-  echo "❌ No main scope found for slug '$MAIN_SCOPE_SLUG' (application: $APPLICATION_ID)" >&2
+  echo "❌ No main scope found for slug '$MAIN_SCOPE_SLUG' or name '$MAIN_SCOPE_NAME' (application: $APPLICATION_ID)" >&2
   echo "💡 Possible causes:" >&2
   echo "   - The main scope '$MAIN_SCOPE_SLUG' has not been created yet" >&2
   echo "   - A disaster recovery scope cannot exist without its main counterpart," >&2
