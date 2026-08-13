@@ -7,6 +7,10 @@ steps:
     type: script
     file: "$OVERRIDES_PATH/deployment/build_datadog_annotations"
     after: build_tolerations
+  - name: setup_logs_provider
+    type: script
+    file: "$OVERRIDES_PATH/deployment/setup_logs_provider"
+    after: build_datadog_annotations
   - name: build_datadog_environment
     type: script
     after: update blue deployment

@@ -2,10 +2,6 @@ provider_categories:
   - logging
 configuration:
   $: "$" # this is necessary to expand the expression $$ to $
-  # Fallback destination for application logs, used when neither the
-  # organization config nor the scope's own "Logs provider" setting says
-  # otherwise. Valid values: cloudwatch | datadog
-  LOGS_PROVIDER: "cloudwatch"
   # Prefix of the annotation the logs controller gates on. Must match
   # CLOUDWATCH_LOGS_ANNOTATION / DATADOG_LOGS_ANNOTATION on this cluster's controller,
   # which the base chart exposes as cloudwatch.logs.annotation and
