@@ -1,4 +1,21 @@
+provider_categories:
+  - logging
 configuration:
+  $: "$" # this is necessary to expand the expression $$ to $
+  # Fallback destination for application logs, used when neither the
+  # organization config nor the scope's own "Logs provider" setting says
+  # otherwise. Valid values: cloudwatch | datadog
+  LOGS_PROVIDER: "cloudwatch"
+  # Prefix of the annotation the logs controller gates on. Must match
+  # CLOUDWATCH_LOGS_ANNOTATION / DATADOG_LOGS_ANNOTATION on this cluster's controller,
+  # which the base chart exposes as cloudwatch.logs.annotation and
+  # logging.datadog.logsAnnotation. Only change this together with the cluster.
+  #
+  # This cluster's controller reads nullplatform.logs.spin.*, so the templates have to
+  # stamp that family or the gate never matches and the logs are dropped silently. The
+  # scope templates also keep stamping the default family while this is not
+  # "nullplatform.logs", so the two sides can move in either order.
+  LOGS_ANNOTATION_PREFIX: "nullplatform.logs.spin"
   $: "$" # this is necessary to expand the expression $$ to $
   LINK_SPECIFICATION_ID: b229c8c8-101a-4dab-b0b0-7aa2e23d1bc1
   RECOVERY_SCOPE_SUFFIX: "recovery"

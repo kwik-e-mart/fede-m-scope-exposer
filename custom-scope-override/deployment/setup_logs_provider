@@ -1,0 +1,123 @@
+#!/bin/bash
+
+# Routes this scope's application logs to CloudWatch or Datadog by injecting the gate
+# annotations through k8s_modifiers, the same channel build_tolerations and
+# build_datadog_annotations already use.
+#
+# The logs controller gates each of its outputs on one annotation per provider:
+#
+#     <prefix>.cloudwatch: 'true'   |   <prefix>.datadog: 'true'
+#
+# The prefix defaults to `nullplatform.logs` and is whatever this cluster's controller
+# is configured to read (CLOUDWATCH_LOGS_ANNOTATION / DATADOG_LOGS_ANNOTATION). It has
+# to match exactly; one character off and the gate never matches and the logs are
+# dropped with no error.
+#
+# Both keys are written on every run, the chosen provider "true" and the other
+# "false". Writing only the chosen one is not enough: the rules are ADDITIVE, so a pod
+# left carrying the scope template's `nullplatform.logs.cloudwatch: 'true'` plus an
+# injected `nullplatform.logs.datadog: 'true'` is delivered to BOTH destinations and
+# billed twice. Verified against Fluent Bit, along with the fix: "false" does not match
+# the rule, so pinning the unchosen provider neutralises it.
+#
+# Overriding the template's own value works because k8s_modifiers can only ADD
+# annotations, but the template merges `k8s_modifiers.deployment.annotations` AFTER its
+# own logs block and duplicate YAML keys resolve last-wins. Verified by rendering the
+# real template with a modifier that flips the key: the modifier's value survives.
+#
+# When the prefix is not the default, both families are written. The scope template may
+# still be on a release that only knows `nullplatform.logs.*`, and a cluster may not
+# have been pointed at the new prefix yet; covering both means neither side has to move
+# first and no intermediate state loses logs.
+#
+# This override duplicates what the scope template resolves on its own once the
+# account is on a scopes release that carries `logs_provider` and
+# `logs_annotation_prefix` in the build context. Drop this script and its workflow
+# steps at that point — it exists to deliver the routing without waiting for that
+# release.
+#
+# Deliberately separate from `setup_cloudwatch_logs`, which injects the
+# aws-for-fluent-bit sidecar for one specific application and must keep working
+# untouched. That script owns containers and volumes; this one owns annotations only.
+# They never touch the same keys.
+
+DEFAULT_PREFIX="nullplatform.logs"
+
+# --- provider: where the logs go -------------------------------------------------
+# Resolution order, lowest to highest precedence.
+PROVIDER="${LOGS_PROVIDER:-cloudwatch}"
+
+# Organization/dimension default, resolved upstream in deployment/build_context.
+# Absent on scopes revisions that predate that resolution. Note this key is always set
+# by current revisions — to "cloudwatch" when nothing is configured — so it cannot be
+# told apart from an explicit setting, which is why the integration below outranks it.
+ACCOUNT_PROVIDER=$(echo "$CONTEXT" | jq -r '.logs_provider? // empty')
+if [ -n "$ACCOUNT_PROVIDER" ]; then
+    PROVIDER="$ACCOUNT_PROVIDER"
+fi
+
+# The scope's own setting. "default" (and absent/null/empty, which is what
+# scopes created before the capability existed have) delegates upward.
+SCOPE_OVERRIDE=$(echo "$CONTEXT" | jq -r '.scope.capabilities.logs_provider_override // "default"')
+if [ -n "$SCOPE_OVERRIDE" ] && [ "$SCOPE_OVERRIDE" != "default" ] && [ "$SCOPE_OVERRIDE" != "null" ]; then
+    PROVIDER="$SCOPE_OVERRIDE"
+fi
+
+# Say so out loud rather than silently sending logs somewhere unintended.
+case "$PROVIDER" in
+    cloudwatch|datadog)
+        ;;
+    *)
+        echo "WARNING: unknown logs provider '$PROVIDER', falling back to cloudwatch"
+        PROVIDER="cloudwatch"
+        ;;
+esac
+
+# --- prefix: which annotation family this cluster gates on ------------------------
+# Account-level, not per-scope: it has to agree with the cluster's logs controller,
+# and a per-scope value could disagree with it and route nowhere.
+PREFIX="${LOGS_ANNOTATION_PREFIX:-$DEFAULT_PREFIX}"
+
+# Not in the `logging` provider category either, for the same reason as the provider
+# above: it holds integration credentials, not routing settings. LOGS_ANNOTATION_PREFIX
+# in values.yaml is the source of truth; this only picks up a value the base
+# build_context already resolved, when there is one.
+ACCOUNT_PREFIX=$(echo "$CONTEXT" | jq -r '.logs_annotation_prefix? // empty')
+if [ -n "$ACCOUNT_PREFIX" ]; then
+    PREFIX="$ACCOUNT_PREFIX"
+fi
+
+# The controller rejects anything outside this alphabet and refuses to start, so
+# catching it here names the misconfiguration instead of shipping a broken manifest.
+#
+# `[[ =~ ]]` rather than piping to grep: grep matches line by line, so a value with an
+# embedded newline passes on the strength of its first line alone and the newline ends
+# up in an annotation key. This form anchors against the whole string.
+if [[ ! "$PREFIX" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+    echo "ERROR: invalid logs annotation prefix '$PREFIX'" >&2
+    exit 1
+fi
+
+echo "Routing application logs to: $PROVIDER (annotation prefix: $PREFIX)"
+
+# --- inject ----------------------------------------------------------------------
+# Every gate this pod could be read on, stated explicitly either way.
+LOGS_ANNOTATIONS=$(jq -nc \
+  --arg prefix "$PREFIX" \
+  --arg default_prefix "$DEFAULT_PREFIX" \
+  --arg provider "$PROVIDER" '
+    def gates($p): {
+      "\($p).cloudwatch": (if $provider == "cloudwatch" then "true" else "false" end),
+      "\($p).datadog":    (if $provider == "datadog"    then "true" else "false" end)
+    };
+    gates($prefix) + (if $prefix == $default_prefix then {} else gates($default_prefix) end)
+')
+
+MODIFIERS=$(echo "$CONTEXT" | jq .k8s_modifiers)
+MODIFIERS=$(echo "$MODIFIERS" | jq --argjson logs_annotations "$LOGS_ANNOTATIONS" '
+  .deployment.annotations = ((.deployment.annotations // {}) + $logs_annotations)
+')
+CONTEXT=$(echo "$CONTEXT" | jq --argjson modifiers "$MODIFIERS" '.k8s_modifiers = $modifiers')
+
+echo "Logs gate annotations set on k8s_modifiers.deployment.annotations:"
+echo "$LOGS_ANNOTATIONS" | jq -r 'to_entries[] | "  \(.key): \(.value)"'
