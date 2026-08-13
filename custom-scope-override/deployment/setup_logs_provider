@@ -116,17 +116,72 @@ fi
 
 echo "Routing application logs to: $PROVIDER (annotation prefix: $PREFIX)"
 
+# --- naming: where CloudWatch logs land ------------------------------------------
+# The scope template used to stamp these four as literals, so every account got the
+# same log group and the same 7-day retention with no way to change either. They live
+# here now, alongside the gates, because both are the same concern: this script owns
+# what the logs controller reads.
+#
+# Each value is rendered against the deployment context, so a value can derive from it
+# the way the defaults do — that is what makes `{{ .namespace.slug }}.{{ .application.slug }}`
+# work as a configurable value rather than a fixed string.
+#
+# `${type}`, `${instance}` and `${container}` are NOT rendered here on purpose: the
+# controller's Lua resolves those per record, at runtime. gomplate leaves `$` alone, so
+# one value can carry both layers, which is what the stream pattern has always done.
+# An explicitly empty value means "do not stamp this annotation", which is why each one
+# is tested with ${VAR+set} rather than :- — an unset variable takes the default, an
+# empty one suppresses the key.
+LOGS_NAMING_ANNOTATIONS='{}'
+if [ "$PROVIDER" = "cloudwatch" ]; then
+    add_naming_annotation() {
+        local key="$1" var_name="$2" default_value="$3" value rendered
+
+        if [ -n "${!var_name+set}" ]; then
+            value="${!var_name}"
+        else
+            value="$default_value"
+        fi
+
+        [ -z "$value" ] && return 0
+
+        # Rendered here and not inside the jq call below: `exit` from a command
+        # substitution only leaves the subshell, so a failed render would print its
+        # error and then stamp an empty value — a wrong destination, silently. A typo
+        # in an operator's pattern has to break the deployment instead.
+        if ! rendered=$(printf '%s' "$CONTEXT" | gomplate -c .=stdin:///context.json -i "$value" 2>&1); then
+            echo "ERROR: could not render logs annotation '$key' from '$value': $rendered" >&2
+            exit 1
+        fi
+
+        LOGS_NAMING_ANNOTATIONS=$(echo "$LOGS_NAMING_ANNOTATIONS" | jq -c \
+          --arg k "nullplatform.logs.cloudwatch.$key" \
+          --arg v "$rendered" '. + {($k): $v}')
+    }
+
+    add_naming_annotation log_group_name LOGS_CLOUDWATCH_LOG_GROUP_NAME \
+        '{{ .namespace.slug }}.{{ .application.slug }}'
+    add_naming_annotation log_stream_log_retention_days LOGS_CLOUDWATCH_LOG_RETENTION_DAYS \
+        '7'
+    add_naming_annotation log_stream_name_pattern LOGS_CLOUDWATCH_LOG_STREAM_NAME_PATTERN \
+        'type=${type};application={{ .application.id }};scope={{ .scope.id }};deploy={{ .deployment.id }};instance=${instance};container=${container}'
+    add_naming_annotation region LOGS_CLOUDWATCH_REGION \
+        '{{ .region }}'
+fi
+
 # --- inject ----------------------------------------------------------------------
-# Every gate this pod could be read on, stated explicitly either way.
+# Every gate this pod could be read on, stated explicitly either way, plus the naming
+# for the destination it was routed to.
 LOGS_ANNOTATIONS=$(jq -nc \
   --arg prefix "$PREFIX" \
   --arg default_prefix "$DEFAULT_PREFIX" \
-  --arg provider "$PROVIDER" '
+  --arg provider "$PROVIDER" \
+  --argjson naming "$LOGS_NAMING_ANNOTATIONS" '
     def gates($p): {
       "\($p).cloudwatch": (if $provider == "cloudwatch" then "true" else "false" end),
       "\($p).datadog":    (if $provider == "datadog"    then "true" else "false" end)
     };
-    gates($prefix) + (if $prefix == $default_prefix then {} else gates($default_prefix) end)
+    gates($prefix) + (if $prefix == $default_prefix then {} else gates($default_prefix) end) + $naming
 ')
 
 MODIFIERS=$(echo "$CONTEXT" | jq .k8s_modifiers)
@@ -135,5 +190,5 @@ MODIFIERS=$(echo "$MODIFIERS" | jq --argjson logs_annotations "$LOGS_ANNOTATIONS
 ')
 CONTEXT=$(echo "$CONTEXT" | jq --argjson modifiers "$MODIFIERS" '.k8s_modifiers = $modifiers')
 
-echo "Logs gate annotations set on k8s_modifiers.deployment.annotations:"
+echo "Logs annotations set on k8s_modifiers.deployment.annotations:"
 echo "$LOGS_ANNOTATIONS" | jq -r 'to_entries[] | "  \(.key): \(.value)"'

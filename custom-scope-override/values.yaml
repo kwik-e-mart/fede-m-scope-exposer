@@ -4,11 +4,28 @@ configuration:
   # which the base chart exposes as cloudwatch.logs.annotation and
   # logging.datadog.logsAnnotation. Only change this together with the cluster.
   #
-  # This cluster's controller reads nullplatform.logs.spin.*, so the templates have to
-  # stamp that family or the gate never matches and the logs are dropped silently. The
-  # scope templates also keep stamping the default family while this is not
-  # "nullplatform.logs", so the two sides can move in either order.
+  # This cluster's controller reads nullplatform.logs.spin.*, so setup_logs_provider has
+  # to stamp that family or the gate never matches and the logs are dropped silently.
+  #
+  # The scope template stamps NO gate of its own any more, so this is the only thing that
+  # gates: a pod that setup_logs_provider leaves untouched — a scope that delegates on an
+  # org with no logging provider configured — ships nowhere.
   LOGS_ANNOTATION_PREFIX: "nullplatform.logs.spin"
+  # Values of the CloudWatch logging annotations the scope template stamps: where the
+  # logs land once something routes them there. A separate concern from the prefix
+  # above, which is about whether they are routed at all.
+  #
+  # Each value is rendered against the deployment context, so it can be a pattern the
+  # way the defaults are. `${type}`, `${instance}` and `${container}` are NOT rendered
+  # at deploy time — the logs controller resolves those per record. An empty value
+  # stamps no annotation at all.
+  #
+  # Left commented: these are the defaults the scope template already applies, and
+  # setting them here would duplicate values that then drift. Uncomment to override.
+  # LOGS_CLOUDWATCH_LOG_GROUP_NAME: "{{ .namespace.slug }}.{{ .application.slug }}"
+  # LOGS_CLOUDWATCH_LOG_RETENTION_DAYS: "7"
+  # LOGS_CLOUDWATCH_LOG_STREAM_NAME_PATTERN: "type=${type};application={{ .application.id }};scope={{ .scope.id }};deploy={{ .deployment.id }};instance=${instance};container=${container}"
+  # LOGS_CLOUDWATCH_REGION: "{{ .region }}"
   $: "$" # this is necessary to expand the expression $$ to $
   LINK_SPECIFICATION_ID: b229c8c8-101a-4dab-b0b0-7aa2e23d1bc1
   RECOVERY_SCOPE_SUFFIX: "recovery"
