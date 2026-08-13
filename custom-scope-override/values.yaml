@@ -1,7 +1,4 @@
-provider_categories:
-  - logging
 configuration:
-  $: "$" # this is necessary to expand the expression $$ to $
   # Prefix of the annotation the logs controller gates on. Must match
   # CLOUDWATCH_LOGS_ANNOTATION / DATADOG_LOGS_ANNOTATION on this cluster's controller,
   # which the base chart exposes as cloudwatch.logs.annotation and
