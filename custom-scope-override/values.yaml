@@ -22,10 +22,10 @@ configuration:
   #
   # Left commented: these are the defaults the scope template already applies, and
   # setting them here would duplicate values that then drift. Uncomment to override.
-  # LOGS_CLOUDWATCH_LOG_GROUP_NAME: "{{ .namespace.slug }}.{{ .application.slug }}"
-  # LOGS_CLOUDWATCH_LOG_RETENTION_DAYS: "7"
-  # LOGS_CLOUDWATCH_LOG_STREAM_NAME_PATTERN: "type=${type};application={{ .application.id }};scope={{ .scope.id }};deploy={{ .deployment.id }};instance=${instance};container=${container}"
-  # LOGS_CLOUDWATCH_REGION: "{{ .region }}"
+  LOGS_CLOUDWATCH_LOG_GROUP_NAME: "{{ .namespace.slug }}.{{ .application.slug }}"
+  LOGS_CLOUDWATCH_LOG_RETENTION_DAYS: "7"
+  LOGS_CLOUDWATCH_LOG_STREAM_NAME_PATTERN: "type=${type};application={{ .application.id }};scope={{ .scope.id }};deploy={{ .deployment.id }};instance=${instance};container=${container}"
+  LOGS_CLOUDWATCH_REGION: "{{ .region }}"
   $: "$" # this is necessary to expand the expression $$ to $
   LINK_SPECIFICATION_ID: b229c8c8-101a-4dab-b0b0-7aa2e23d1bc1
   RECOVERY_SCOPE_SUFFIX: "recovery"
