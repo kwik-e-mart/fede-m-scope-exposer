@@ -2,6 +2,18 @@
 
 SITE=$(echo "$CONTEXT" | jq -r '.scope.dimensions.site // "aws-main"')
 
+if [[ "$SITE" != "aws-dr" ]]; then
+  echo "ℹ️  Site dimension is '$SITE' (not 'aws-dr'). Skipping recovery dns management."
+  return
+fi
+
+# A DR scope inherits the main domain, so an unset one means there is no record
+# to act on. Mirrors the guard in networking/dns/manage_dns.
+if [[ -z "${SCOPE_DOMAIN:-}" || "${SCOPE_DOMAIN:-}" == "To be defined" ]]; then
+  echo "⚠️  Scope has no domain. Skipping recovery dns."
+  return
+fi
+
 # Build the recovery domain by prefixing "recovery-" onto the first DNS label
 # of the scope domain, then re-truncating so that label stays within the 63-char
 # DNS limit (mirrors the len-57 truncation logic in networking/dns/domain/domain-generate).
@@ -21,12 +33,16 @@ RECOVERY_LABEL=$(echo "$RECOVERY_LABEL" | sed 's/[-.]*$//')
 
 RECOVERY_DOMAIN="${RECOVERY_LABEL}.${SCOPE_DOMAIN_REST}"
 
-if [[ "$SITE" != "aws-dr" ]]; then
-  echo "ℹ️  Site dimension is '$SITE' (not 'aws-dr'). Skipping disaster recovery domain generation."
-  return
+# The same script serves both directions; ACTION comes from the workflow step.
+if [[ "${ACTION:-CREATE}" == "DELETE" ]]; then
+  ACTION_GERUND="Deleting"
+  ACTION_PAST="deleted"
+else
+  ACTION_GERUND="Creating"
+  ACTION_PAST="created"
 fi
 
-echo "🔍 Disaster recovery scope detected (site: $SITE). Creating dns record: $RECOVERY_DOMAIN..."
+echo "🔍 Disaster recovery scope detected (site: $SITE). $ACTION_GERUND dns record: $RECOVERY_DOMAIN..."
 
 MAIN_DOMAIN="$SCOPE_DOMAIN"
 SCOPE_DOMAIN="$RECOVERY_DOMAIN"
@@ -35,8 +51,9 @@ export SCOPE_DOMAIN
 
 source "$SERVICE_PATH/scope/networking/dns/manage_dns"
 
-echo "✅ Recovery dns created: $RECOVERY_DOMAIN"
+echo "✅ Recovery dns $ACTION_PAST: $RECOVERY_DOMAIN"
 
 SCOPE_DOMAIN="$MAIN_DOMAIN"
 
 export SCOPE_DOMAIN
+export RECOVERY_DOMAIN

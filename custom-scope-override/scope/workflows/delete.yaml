@@ -1,19 +1,26 @@
 steps:
-- name: networking
-  type: workflow
-  steps:
-    - name: delete_recovery_dns
-      type: script
-      file: "$OVERRIDES_PATH/scope/disaster_recovery/manage_recovery_dns"
-      after: delete dns
-      configuration:
-        ACTION: DELETE
-      pre:
-        name: build_recovery_dns_context
+  - name: networking
+    type: workflow
+    steps:
+      - name: manage_recovery_dns
         type: script
-        file: "$SERVICE_PATH/scope/networking/dns/build_dns_context"
+        file: "$OVERRIDES_PATH/scope/disaster_recovery/manage_recovery_dns"
+        after: delete dns
+        configuration:
+          ACTION: DELETE
         output:
-          - name: HOSTED_PUBLIC_ZONE_ID
+          - name: RECOVERY_DOMAIN
             type: environment
-          - name: HOSTED_PRIVATE_ZONE_ID
-            type: environment
+        pre:
+          name: build_recovery_dns_context
+          type: script
+          file: "$SERVICE_PATH/scope/networking/dns/build_dns_context"
+          output:
+            - name: HOSTED_PUBLIC_ZONE_ID
+              type: environment
+            - name: HOSTED_PRIVATE_ZONE_ID
+              type: environment
+      - name: delete_recovery_domain
+        type: script
+        file: "$OVERRIDES_PATH/scope/disaster_recovery/delete_recovery_domain"
+        after: manage_recovery_dns

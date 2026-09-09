@@ -1,0 +1,57 @@
+#!/bin/bash
+
+SITE=$(echo "$CONTEXT" | jq -r '.scope.dimensions.site // "aws-main"')
+
+if [[ "$SITE" != "aws-dr" ]]; then
+  echo "ℹ️  Site dimension is '$SITE' (not 'aws-dr'). Skipping recovery domain deletion."
+  return
+fi
+
+# Set by manage_recovery_dns, which runs just before this step. Empty means that
+# step bailed out (no scope domain), so there is nothing registered to remove.
+if [[ -z "${RECOVERY_DOMAIN:-}" ]]; then
+  echo "⚠️  RECOVERY_DOMAIN is not set. Skipping recovery domain deletion."
+  return
+fi
+
+SCOPE_ID=$(echo "$CONTEXT" | jq -r '.scope.id')
+
+echo "🔍 Looking up recovery domain '$RECOVERY_DOMAIN' for scope '$SCOPE_ID'..."
+# Keep stderr out of $DOMAINS: it is parsed as JSON, and any CLI warning on
+# stderr would corrupt it.
+DOMAINS_STDERR=$(mktemp)
+if ! DOMAINS=$(np scope domain list --organization_id "$ORGANIZATION_ID" --scope_id "$SCOPE_ID" --name "$RECOVERY_DOMAIN" --format json 2>"$DOMAINS_STDERR"); then
+  echo "❌ Failed to list domains for scope '$SCOPE_ID'" >&2
+  echo "💡 Possible causes:" >&2
+  echo "   - The nullplatform CLI is not authenticated in this environment" >&2
+  echo "🔧 How to fix:" >&2
+  echo "   - Verify CLI auth and retry: np scope domain list --organization_id $ORGANIZATION_ID --scope_id $SCOPE_ID" >&2
+  echo "   - CLI error: $(cat "$DOMAINS_STDERR")" >&2
+  rm -f "$DOMAINS_STDERR"
+  exit 1
+fi
+rm -f "$DOMAINS_STDERR"
+
+DOMAIN_IDS=$(echo "$DOMAINS" | jq -r --arg name "$RECOVERY_DOMAIN" \
+  '.results[]? | select(.name == $name) | .id')
+
+if [[ -z "$DOMAIN_IDS" ]]; then
+  echo "ℹ️  No recovery domain '$RECOVERY_DOMAIN' registered for scope '$SCOPE_ID'. Nothing to delete."
+  return
+fi
+
+# The scope may carry more than one row for the name; delete every match so a
+# re-create is not blocked by a leftover.
+while read -r DOMAIN_ID; do
+  echo "🗑️  Deleting recovery domain '$RECOVERY_DOMAIN' (id: $DOMAIN_ID)..."
+  if ! np scope domain delete --id "$DOMAIN_ID"; then
+    echo "❌ Failed to delete recovery domain '$RECOVERY_DOMAIN' (id: $DOMAIN_ID)" >&2
+    echo "💡 Possible causes:" >&2
+    echo "   - The CLI lacks permissions to delete this domain" >&2
+    echo "   - Leaving it behind blocks re-creating the scope, since the name is already taken" >&2
+    echo "🔧 How to fix:" >&2
+    echo "   - Delete it manually: np scope domain delete --id $DOMAIN_ID" >&2
+    exit 1
+  fi
+  echo "✅ Recovery domain deleted: $RECOVERY_DOMAIN (id: $DOMAIN_ID)"
+done <<< "$DOMAIN_IDS"
