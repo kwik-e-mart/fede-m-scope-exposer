@@ -5,3 +5,10 @@ steps:
     action: skip
   - name: "add_rule_to_service"
     action: skip
+  # Drops the rules left with no link behind them. Wired here and not in
+  # link.yaml: on create the link may still be pending_create and absent from the
+  # active list, which would prune the rule that was just added.
+  - name: "prune_orphan_rules"
+    type: script
+    file: "$SERVICE_PATH/scripts/prune_orphan_rules"
+    after: "build_ingress"

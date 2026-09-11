@@ -1,0 +1,39 @@
+#!/bin/bash
+
+# Resolves the paths involved in an update (rename) action.
+#
+# build_context resolves RULE_PATH as `.link.attributes.path // .parameters.path`,
+# which is right for create, delete and refresh but wrong here: on an update the
+# link's stored attributes may or may not carry the rename yet, depending on
+# whether the platform persisted it before dispatching the action. The action's
+# own parameters always carry what the user submitted, so that is the authority
+# for the new path.
+#
+# OLD_RULE_PATH is best effort: it is knowable only while the two disagree. Once
+# the rename is persisted both read the same and the previous value is gone. The
+# ingress does not depend on knowing it (the prune drops whatever the link used
+# to claim through EXCLUDE_LINK_ID); only the service's attributes.rules does.
+
+NEW_RULE_PATH=$(echo "$CONTEXT" | jq -r '.parameters.path // empty')
+STORED_RULE_PATH=$(echo "$CONTEXT" | jq -r '.link.attributes.path // empty')
+
+if [ -z "$NEW_RULE_PATH" ]; then
+  echo "❌ The update action carries no path parameter"
+  return 1
+fi
+
+if [ -n "$STORED_RULE_PATH" ] && [ "$STORED_RULE_PATH" != "$NEW_RULE_PATH" ]; then
+  OLD_RULE_PATH="$STORED_RULE_PATH"
+  echo "📝 Rename $OLD_RULE_PATH -> $NEW_RULE_PATH"
+else
+  OLD_RULE_PATH=""
+  echo "📝 Publishing $NEW_RULE_PATH (previous path already overwritten upstream)"
+fi
+
+# The ingress rule to write, and the two knobs the prune needs to converge
+# regardless of when the platform persisted the rename.
+RULE_PATH="$NEW_RULE_PATH"
+EXTRA_PATH="$NEW_RULE_PATH"
+EXCLUDE_LINK_ID="$LINK_ID"
+
+export RULE_PATH OLD_RULE_PATH NEW_RULE_PATH EXTRA_PATH EXCLUDE_LINK_ID

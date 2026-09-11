@@ -8,6 +8,24 @@ if [[ $ACTION == "add" ]]; then
       entity_nrn: (.entity_nrn | sub(":scope=[^:]+$"; ""))
     }
   ')
+elif [[ $ACTION == "rename" ]]; then
+  # One jq pass: dropping the old entry and adding the new one as two separate
+  # patches would send the second built from the same stale CONTEXT snapshot,
+  # and the second write would undo the first.
+  # OLD_RULE_PATH may be empty when the rename was persisted before this action
+  # started; the new entry is still added and the stale one is left behind.
+  UPDATED_ATTRIBUTES=$(echo "$CONTEXT" | jq \
+    --arg old "$OLD_RULE_PATH" --arg new "$RULE_PATH" --arg scope "$SCOPE_SLUG" '
+    .service.attributes |= (
+      .rules //= []
+      | .rules |= map(select($old == "" or .path != $old))
+      | .rules |= (map(select(.path != $new)) + [{path: $new, scope: $scope}])
+    ) |
+    {
+      attributes: .service.attributes,
+      entity_nrn: (.entity_nrn | sub(":scope=[^:]+$"; ""))
+    }
+  ')
 elif [[ $ACTION == "remove" ]]; then
   UPDATED_ATTRIBUTES=$(echo "$CONTEXT" | jq --arg path "$RULE_PATH" '
     .service.attributes |= (.rules //= [] | .rules |= map(select(.path != $path))) |

@@ -34,6 +34,15 @@ steps:
       - name: INGRESS_FILE
         type: file
         file: "$OUTPUT_DIR/ingress-$SERVICE_ID-$SCOPE_ID-public.yaml"
+  # build_template above removes the rule by the link's current path, which is
+  # the wrong key whenever that path was renamed at some point: it would delete
+  # nothing and leave the old rule serving. EXCLUDE_LINK_ID makes the removal
+  # authoritative, by link rather than by path.
+  - name: "prune_orphan_rules"
+    type: script
+    file: "$SERVICE_PATH/scripts/prune_orphan_rules"
+    configuration:
+      EXCLUDE_LINK_ID: "$LINK_ID"
   - name: apply
     type: script
     file: "$SERVICE_PATH/scripts/apply"

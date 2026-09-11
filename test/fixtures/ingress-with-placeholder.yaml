@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: k-8-s-exposer-public
+  namespace: nullplatform
+spec:
+  ingressClassName: alb
+  rules:
+    - host: exposer.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: response-404
+                port:
+                  name: use-annotation
+          - path: /old
+            pathType: Prefix
+            backend:
+              service:
+                name: d-100000002-200000002
+                port:
+                  number: 8080

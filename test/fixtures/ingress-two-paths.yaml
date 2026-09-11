@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: k-8-s-exposer-aaaa1111-public
+  namespace: nullplatform
+  labels:
+    service_id: aaaa1111-bbbb-2222-cccc-333344445555
+  annotations:
+    alb.ingress.kubernetes.io/actions.response-404: '{"type":"fixed-response"}'
+    alb.ingress.kubernetes.io/actions.bg-deployment-100000001: '{"type":"forward"}'
+spec:
+  ingressClassName: alb
+  rules:
+    - host: exposer.example.com
+      http:
+        paths:
+          - path: /web/api/ping
+            pathType: Prefix
+            backend:
+              service:
+                name: d-100000001-200000001
+                port:
+                  number: 8080
+          - path: /web
+            pathType: Prefix
+            backend:
+              service:
+                name: bg-deployment-100000001
+                port:
+                  name: use-annotation

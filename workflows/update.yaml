@@ -1,1 +1,86 @@
+# Rename of a published path.
+#
+# This workflow used to be empty, so the platform stored the new path while the
+# ingress kept serving the old one: the update action reported success and the
+# routing never moved. The rule it left behind had no link claiming its path any
+# more, so no later action could reach it either.
 steps:
+  - name: "find k8s namespace"
+    type: script
+    file: "$SERVICE_PATH/scripts/fetch_provider_data"
+    output:
+      - name: K8S_NAMESPACE
+        type: environment
+      - name: ALB_NAME
+        type: environment
+  - name: "build context"
+    type: script
+    file: "$SERVICE_PATH/scripts/build_context"
+    output:
+      - name: SERVICE_ID
+        type: environment
+      - name: SERVICE_NAME
+        type: environment
+      - name: ACTION_ID
+        type: environment
+      - name: ACTION_NAME
+        type: environment
+      - name: LINK_ID
+        type: environment
+      - name: LINK_NAME
+        type: environment
+      - name: SCOPE_ID
+        type: environment
+      - name: SCOPE_SLUG
+        type: environment
+      - name: RULE_PATH
+        type: environment
+  - name: "resolve_update_context"
+    type: script
+    file: "$SERVICE_PATH/scripts/resolve_update_context"
+    output:
+      - name: RULE_PATH
+        type: environment
+      - name: OLD_RULE_PATH
+        type: environment
+      - name: NEW_RULE_PATH
+        type: environment
+      - name: EXTRA_PATH
+        type: environment
+      - name: EXCLUDE_LINK_ID
+        type: environment
+  - name: "build_rule"
+    type: script
+    file: "$SERVICE_PATH/scripts/build_rule"
+    output:
+      - name: SCOPE_RULE
+        type: environment
+  - name: "build_ingress"
+    type: script
+    file: "$SERVICE_PATH/scripts/build_ingress_with_rule"
+    output:
+      - name: INGRESS_FILE
+        type: file
+        file: "$OUTPUT_DIR/ingress-$SERVICE_ID-$SCOPE_ID-public.yaml"
+  # Writes the new path and drops the old one in the same manifest, so the move
+  # is a single apply rather than two states the load balancer could sit between.
+  - name: "prune_orphan_rules"
+    type: script
+    file: "$SERVICE_PATH/scripts/prune_orphan_rules"
+  - name: apply
+    type: script
+    file: "$SERVICE_PATH/scripts/apply"
+    configuration:
+      ACTION: apply
+      DRY_RUN: false
+    post:
+      name: wait ingress_reconciliation
+      type: script
+      file: "$SERVICE_PATH/scripts/verify_ingress_reconciliation"
+      configuration:
+        IS_SERVICE_CREATION: false
+  - name: "rename_rule_in_service"
+    type: script
+    file: "$SERVICE_PATH/scripts/update_service"
+    configuration:
+      ACTION: rename
