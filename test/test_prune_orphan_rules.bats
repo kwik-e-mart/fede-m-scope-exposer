@@ -75,7 +75,7 @@ teardown() { teardown_exposer_env; }
 
   run_prune
   [ "$status" -eq 0 ]
-  [[ "$output" == *"No active links"* ]]
+  [[ "$output" == *"No active links reported"* ]]
 
   run result_paths
   [[ "$output" == *"/web/api/ping"* ]]
@@ -120,7 +120,7 @@ teardown() { teardown_exposer_env; }
 
   run_prune
   [ "$status" -eq 0 ]
-  [[ "$output" == *"No active links"* ]]
+  [[ "$output" == *"No active links reported"* ]]
 
   run result_paths
   [[ "$output" == *"/web/api/ping"* ]]
@@ -145,4 +145,49 @@ teardown() { teardown_exposer_env; }
   run_prune
   [ "$status" -eq 0 ]
   [[ "$output" == *"No ingress file to prune"* ]]
+}
+
+@test "EXCLUDE_LINK_ID drops that link's path even while the API still lists it" {
+  # What unlink needs: the link is still active while its delete action runs.
+  load_ingress_fixture ingress-two-paths.yaml
+  export NP_LINKS_JSON="$(links_json /web /web/api/ping)"
+  export EXCLUDE_LINK_ID="link-2"   # the one holding /web/api/ping
+
+  run_prune
+  [ "$status" -eq 0 ]
+
+  run result_paths
+  [[ "$output" == *"/web"* ]]
+  [[ "$output" != *"/web/api/ping"* ]]
+}
+
+@test "EXTRA_PATH keeps a path the API has not persisted yet" {
+  load_ingress_fixture ingress-two-paths.yaml
+  export NP_LINKS_JSON="$(links_json /web/api/ping)"
+  export EXTRA_PATH="/web"
+
+  run_prune
+  [ "$status" -eq 0 ]
+
+  run result_paths
+  [[ "$output" == *"/web"* ]]
+  [[ "$output" == *"/web/api/ping"* ]]
+}
+
+@test "rename converges whether or not the new path was persisted first" {
+  # Both knobs together: drop whatever the link currently claims, keep the new
+  # path. The outcome must not depend on the platform's write ordering.
+  for listed in /web/api/ping /web; do
+    load_ingress_fixture ingress-two-paths.yaml
+    export NP_LINKS_JSON="$(links_json $listed)"
+    export EXCLUDE_LINK_ID="link-1"
+    export EXTRA_PATH="/web"
+
+    run_prune
+    [ "$status" -eq 0 ]
+
+    run result_paths
+    [[ "$output" == *"/web"* ]]
+    [[ "$output" != *"/web/api/ping"* ]]
+  done
 }

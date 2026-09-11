@@ -54,9 +54,10 @@ result_paths() {
 
 # Build the JSON `np link list` returns, from the given paths.
 links_json() {
-  local out="" p
+  local out="" p i=1
   for p in "$@"; do
-    out="$out{\"attributes\":{\"path\":\"$p\"}},"
+    out="$out{\"id\":\"link-$i\",\"attributes\":{\"path\":\"$p\"}},"
+    i=$((i + 1))
   done
   echo "{\"results\":[${out%,}]}"
 }

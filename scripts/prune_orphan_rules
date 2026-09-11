@@ -11,9 +11,20 @@
 # Runs after build_ingress_with_rule and before apply: it edits the file that
 # script left in OUTPUT_DIR, never the live cluster object.
 #
-# Wired into refresh only. On link/create the link may still be pending_create
-# and therefore absent from the active list, which would prune the rule that was
-# just added.
+# Two knobs make the same script usable from update and unlink, where the
+# platform's view of the link and the intent of the action disagree:
+#
+#   EXCLUDE_LINK_ID  drop this link's path from the keep-list, whatever the API
+#                    says it currently is. Used by unlink (the link is still
+#                    active while its delete action runs) and by update (the old
+#                    path must go regardless of whether the rename was persisted
+#                    before the action started).
+#   EXTRA_PATH       keep this path even if it is not in the active list yet.
+#                    Used by update for the new path, and by create if ever
+#                    wired there, since the link may still be pending_create.
+#
+# Together they make the outcome independent of when the platform persists the
+# link: both orderings converge on the same ingress.
 
 INGRESS_FILE="$OUTPUT_DIR/ingress-$SERVICE_ID-$SCOPE_ID-public.yaml"
 
@@ -30,12 +41,31 @@ if [ $? -ne 0 ]; then
   return 0
 fi
 
-ACTIVE_PATHS=$(jq -c '[.results[]?.attributes.path | select(. != null)]' <<< "$LINKS" 2>/dev/null)
+# The guard is evaluated on the raw response, before the knobs are applied.
+# Otherwise deleting a service's last link — which legitimately leaves the
+# ingress with no paths — would be indistinguishable from the API answering
+# nothing, and the prune would refuse exactly when it is needed.
+RAW_COUNT=$(jq '[.results[]?.attributes.path | select(. != null)] | length' <<< "$LINKS" 2>/dev/null)
 
-# An empty list can mean a freshly created service or a truncated response.
-# Neither is a reason to wipe every rule off the ingress.
-if [ -z "$ACTIVE_PATHS" ] || [ "$(jq 'length' <<< "$ACTIVE_PATHS")" -eq 0 ]; then
-  echo "⚠ No active links for service $SERVICE_ID, skipping the prune"
+if [ -z "$RAW_COUNT" ] || [ "$RAW_COUNT" -eq 0 ]; then
+  echo "⚠ No active links reported for service $SERVICE_ID, skipping the prune"
+  return 0
+fi
+
+ACTIVE_PATHS=$(jq -c \
+  --arg exclude "${EXCLUDE_LINK_ID:-}" \
+  --arg extra "${EXTRA_PATH:-}" '
+    [ .results[]?
+      | select($exclude == "" or (.id // "") != $exclude)
+      | .attributes.path
+      | select(. != null)
+    ]
+    + (if $extra == "" then [] else [$extra] end)
+    | unique
+  ' <<< "$LINKS" 2>/dev/null)
+
+if [ -z "$ACTIVE_PATHS" ]; then
+  echo "⚠ Could not read the link paths, skipping the prune"
   return 0
 fi
 
