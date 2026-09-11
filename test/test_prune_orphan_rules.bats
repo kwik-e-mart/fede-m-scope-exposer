@@ -1,0 +1,148 @@
+#!/usr/bin/env bats
+
+load helpers
+
+setup()    { setup_exposer_env; }
+teardown() { teardown_exposer_env; }
+
+@test "prunes the rule whose path no longer has an active link" {
+  load_ingress_fixture ingress-two-paths.yaml
+  export NP_LINKS_JSON="$(links_json /web)"
+
+  run_prune
+  [ "$status" -eq 0 ]
+
+  run result_paths
+  [[ "$output" == *"/web"* ]]
+  [[ "$output" != *"/web/api/ping"* ]]
+}
+
+@test "keeps every path that does have an active link" {
+  load_ingress_fixture ingress-two-paths.yaml
+  export NP_LINKS_JSON="$(links_json /web /web/api/ping)"
+
+  run_prune
+  [ "$status" -eq 0 ]
+
+  run result_paths
+  [[ "$output" == *"/web/api/ping"* ]]
+  [[ "$output" == *"/web"* ]]
+}
+
+@test "never prunes the response-404 placeholder" {
+  load_ingress_fixture ingress-with-placeholder.yaml
+  export NP_LINKS_JSON="$(links_json /other)"
+
+  run_prune
+  [ "$status" -eq 0 ]
+
+  run result_paths
+  [[ "$output" == *"/"* ]]
+  [[ "$output" != *"/old"* ]]
+}
+
+@test "reinserts the 404 placeholder when pruning empties the ingress" {
+  load_ingress_fixture ingress-only-orphan.yaml
+  export NP_LINKS_JSON="$(links_json /other)"
+
+  run_prune
+  [ "$status" -eq 0 ]
+
+  run bash -c "yq '.spec.rules[0].http.paths | length' '$(ingress_file)'"
+  [ "$output" = "1" ]
+
+  run bash -c "yq '.spec.rules[0].http.paths[0].backend.service.name' '$(ingress_file)'"
+  [ "$output" = "response-404" ]
+}
+
+@test "GUARD: prunes nothing when the CLI call fails" {
+  load_ingress_fixture ingress-two-paths.yaml
+  export NP_EXIT_CODE=1
+  export NP_LINKS_JSON=""
+
+  run_prune
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Could not list links"* ]]
+
+  run result_paths
+  [[ "$output" == *"/web/api/ping"* ]]
+  [[ "$output" == *"/web"* ]]
+}
+
+@test "GUARD: prunes nothing when the link list comes back empty" {
+  load_ingress_fixture ingress-two-paths.yaml
+  export NP_LINKS_JSON='{"results":[]}'
+
+  run_prune
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No active links"* ]]
+
+  run result_paths
+  [[ "$output" == *"/web/api/ping"* ]]
+  [[ "$output" == *"/web"* ]]
+}
+
+@test "leaves the ingress annotations untouched" {
+  load_ingress_fixture ingress-two-paths.yaml
+  export NP_LINKS_JSON="$(links_json /web)"
+
+  run_prune
+  [ "$status" -eq 0 ]
+
+  run bash -c "yq '.metadata.annotations | keys | .[]' '$(ingress_file)'"
+  [[ "$output" == *"actions.bg-deployment-100000001"* ]]
+  [[ "$output" == *"actions.response-404"* ]]
+}
+
+@test "preserves the rest of the document (host, labels, ingressClassName)" {
+  load_ingress_fixture ingress-two-paths.yaml
+  export NP_LINKS_JSON="$(links_json /web)"
+
+  run_prune
+  [ "$status" -eq 0 ]
+
+  run bash -c "yq '.spec.ingressClassName' '$(ingress_file)'"
+  [ "$output" = "alb" ]
+
+  run bash -c "yq '.spec.rules[0].host' '$(ingress_file)'"
+  [ "$output" = "exposer.example.com" ]
+
+  run bash -c "yq '.metadata.labels.service_id' '$(ingress_file)'"
+  [ "$output" = "aaaa1111-bbbb-2222-cccc-333344445555" ]
+}
+
+@test "GUARD: prunes nothing on a CLI error body (401) returned with exit 0" {
+  # Real payload observed when the token expires. Exit 0 is forced on purpose:
+  # even if the CLI did not signal the failure through its exit code, the body
+  # carries no .results and the prune must not run.
+  load_ingress_fixture ingress-two-paths.yaml
+  export NP_LINKS_JSON='{"error":"HTTP status: 401, response: {\"statusCode\":401,\"error\":\"Invalid token\"}"}'
+
+  run_prune
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No active links"* ]]
+
+  run result_paths
+  [[ "$output" == *"/web/api/ping"* ]]
+  [[ "$output" == *"/web"* ]]
+}
+
+@test "GUARD: prunes nothing on non-JSON CLI output" {
+  load_ingress_fixture ingress-two-paths.yaml
+  export NP_LINKS_JSON='this is not json'
+
+  run_prune
+  [ "$status" -eq 0 ]
+
+  run result_paths
+  [[ "$output" == *"/web/api/ping"* ]]
+  [[ "$output" == *"/web"* ]]
+}
+
+@test "GUARD: does not fail when the ingress file is missing" {
+  export NP_LINKS_JSON="$(links_json /web)"
+
+  run_prune
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No ingress file to prune"* ]]
+}
