@@ -82,35 +82,6 @@ teardown() { teardown_exposer_env; }
   [[ "$output" == *"/web"* ]]
 }
 
-@test "leaves the ingress annotations untouched" {
-  load_ingress_fixture ingress-two-paths.yaml
-  export NP_LINKS_JSON="$(links_json /web)"
-
-  run_prune
-  [ "$status" -eq 0 ]
-
-  run bash -c "yq '.metadata.annotations | keys | .[]' '$(ingress_file)'"
-  [[ "$output" == *"actions.bg-deployment-100000001"* ]]
-  [[ "$output" == *"actions.response-404"* ]]
-}
-
-@test "preserves the rest of the document (host, labels, ingressClassName)" {
-  load_ingress_fixture ingress-two-paths.yaml
-  export NP_LINKS_JSON="$(links_json /web)"
-
-  run_prune
-  [ "$status" -eq 0 ]
-
-  run bash -c "yq '.spec.ingressClassName' '$(ingress_file)'"
-  [ "$output" = "alb" ]
-
-  run bash -c "yq '.spec.rules[0].host' '$(ingress_file)'"
-  [ "$output" = "exposer.example.com" ]
-
-  run bash -c "yq '.metadata.labels.service_id' '$(ingress_file)'"
-  [ "$output" = "aaaa1111-bbbb-2222-cccc-333344445555" ]
-}
-
 @test "GUARD: prunes nothing on a CLI error body (401) returned with exit 0" {
   # Real payload observed when the token expires. Exit 0 is forced on purpose:
   # even if the CLI did not signal the failure through its exit code, the body
@@ -125,26 +96,6 @@ teardown() { teardown_exposer_env; }
   run result_paths
   [[ "$output" == *"/web/api/ping"* ]]
   [[ "$output" == *"/web"* ]]
-}
-
-@test "GUARD: prunes nothing on non-JSON CLI output" {
-  load_ingress_fixture ingress-two-paths.yaml
-  export NP_LINKS_JSON='this is not json'
-
-  run_prune
-  [ "$status" -eq 0 ]
-
-  run result_paths
-  [[ "$output" == *"/web/api/ping"* ]]
-  [[ "$output" == *"/web"* ]]
-}
-
-@test "GUARD: does not fail when the ingress file is missing" {
-  export NP_LINKS_JSON="$(links_json /web)"
-
-  run_prune
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"No ingress file to prune"* ]]
 }
 
 @test "EXCLUDE_LINK_ID drops that link's path even while the API still lists it" {

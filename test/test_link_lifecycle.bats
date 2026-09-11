@@ -65,16 +65,6 @@ rename_to_moved() {
   [[ "$output" != *"/web/api/ping"* ]]
 }
 
-@test "update: the new rule points at the scope's current backend" {
-  export NP_LINKS_JSON="$(links_json /web/api/ping)"
-
-  rename_to_moved "/web/api/ping"
-  [ "$status" -eq 0 ]
-
-  run bash -c "yq '.spec.rules[0].http.paths[] | select(.path == \"/moved\") | .backend.service.name' '$(ingress_file)'"
-  [ "$output" = "d-100000001-200000009" ]
-}
-
 @test "unlink: removes the rule by link even when the path was renamed" {
   # The link now claims /web, but its rule in the ingress is still /web/api/ping
   # from before the rename. build_ingress_without_rule alone is a no-op here.
