@@ -7,6 +7,15 @@ if [[ "$RULE_PATHS" == "[]" ]]; then
   exit 1
 fi
 
+ENTRY_DEFS=$(cat "$SERVICE_PATH/scripts/ingress_entry.jq")
+
+ENTRY_PATH=$(jq -nr --argjson desired "$RULE_PATHS" "$ENTRY_DEFS"' entry_path($desired)')
+
+if [[ "$(echo "$RULE_PATHS" | jq 'length')" -gt 1 && "${#ENTRY_PATH}" -gt 128 ]]; then
+  echo "Error: the declared paths need ${#ENTRY_PATH} characters as a single ALB path pattern, and the limit is 128. Declare fewer or shorter paths."
+  exit 1
+fi
+
 INGRESS_NAME=$(kubectl get ingress -n "$K8S_NAMESPACE" -l "service_id=$SERVICE_ID" -o jsonpath="{.items[0].metadata.name}")
 INGRESS=$(kubectl get ingress -n "$K8S_NAMESPACE" "$INGRESS_NAME" -o json)
 
@@ -17,38 +26,32 @@ if [[ "$ANNOTATION" != "null" && -n "$ANNOTATION" ]]; then
   SERVICE=$(echo "$SERVICE" | jq --arg scope_id "$SCOPE_ID" '.name = "bg-deployment-" + $scope_id')
 fi
 
-STALE_PATHS=$(echo "$CONTEXT" | jq -c --arg scope "$SCOPE_SLUG" --argjson desired "$RULE_PATHS" '
-  (.service.attributes.rules // [])
-  | map(select(.scope == $scope) | .path)
-  | map(select(. as $p | $desired | index($p) == null))
+PUBLISHED_PATHS=$(echo "$CONTEXT" | jq -c --arg scope "$SCOPE_SLUG" '
+  (.service.attributes.rules // []) | map(select(.scope == $scope) | .path)
 ')
-
-echo "Publishing paths $RULE_PATHS for scope $SCOPE_ID"
-
-if [[ "$STALE_PATHS" != "[]" ]]; then
-  echo "Removing paths $STALE_PATHS, no longer declared by the link"
-fi
 
 ANNOTATION_KEY="alb.ingress.kubernetes.io/actions.bg-deployment-$SCOPE_ID"
 
+echo "Publishing paths $RULE_PATHS for scope $SCOPE_ID as $ENTRY_PATH"
+
 UPDATED_INGRESS=$(echo "$INGRESS" | jq \
   --argjson desired "$RULE_PATHS" \
-  --argjson stale "$STALE_PATHS" \
+  --argjson published "$PUBLISHED_PATHS" \
   --argjson service "$SERVICE" \
   --arg annotation_key "$ANNOTATION_KEY" \
-  --arg annotation "$ANNOTATION" '
-  def rule($path): {path: $path, pathType: "Prefix", backend: {service: $service}};
-
-  .spec.rules[0].http.paths |= (
-    map(select(.backend.service.name != "response-404"))
-    | map(select(.path as $path | $stale | index($path) == null))
-    | reduce $desired[] as $path (.;
-        (map(.path) | index($path)) as $index
-        | if $index == null then . + [rule($path)] else .[$index] = rule($path) end
-      )
-  )
+  --arg annotation "$ANNOTATION" \
+  "$ENTRY_DEFS"'
+  owned_entry_paths($published; $desired) as $owned
+  | { path: entry_path($desired), pathType: entry_type($desired), backend: { service: $service } } as $entry
+  | .spec.rules[0].http.paths |= (
+      map(select(.backend.service.name != "response-404"))
+      | ([ range(0; length) as $i | select(.[$i].path as $p | $owned | index($p) != null) | $i ] | first) as $at
+      | (map(select(.path as $p | $owned | index($p) == null))) as $rest
+      | if $at == null then $rest + [$entry] else $rest[0:$at] + [$entry] + $rest[$at:] end
+    )
   | .metadata.annotations |= (
       del(.[$annotation_key])
+      | .["alb.ingress.kubernetes.io/use-regex-path-match"] = "true"
       | if $annotation == "null" or $annotation == "" then . else .[$annotation_key] = $annotation end
     )
 ')
