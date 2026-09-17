@@ -53,9 +53,7 @@
       "slug": "the-link-name-from-the-user",
       "attributes": {
         "path": "/users",
-        "additional_paths": [
-          "/payments"
-        ],
+        "additional_paths": [],
         "scope": "dev-us"
       },
       "specification": {
