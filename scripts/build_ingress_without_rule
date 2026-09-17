@@ -2,8 +2,6 @@
 
 set -euo pipefail
 
-ENTRY_DEFS=$(cat "$SERVICE_PATH/scripts/ingress_entry.jq")
-
 INGRESS_NAME=$(kubectl get ingress -n "$K8S_NAMESPACE" -l "service_id=$SERVICE_ID" -o jsonpath="{.items[0].metadata.name}")
 INGRESS=$(kubectl get ingress -n "$K8S_NAMESPACE" "$INGRESS_NAME" -o json)
 
@@ -14,16 +12,14 @@ echo "Removing paths $RULE_PATHS for scope $SCOPE_ID"
 
 UPDATED_INGRESS=$(echo "$INGRESS" | jq \
   --argjson removed "$RULE_PATHS" \
-  --arg annotation_key "$ANNOTATION_KEY" \
-  "$ENTRY_DEFS"'
-  owned_entry_paths($removed; $removed) as $owned
-  | .spec.rules[0].http.paths |= (
-      map(select(.path as $path | $owned | index($path) == null))
-      | if length == 0
-        then [{path: "/", pathType: "Prefix", backend: {service: {name: "response-404", port: {name: "use-annotation"}}}}]
-        else .
-        end
-    )
+  --arg annotation_key "$ANNOTATION_KEY" '
+  .spec.rules[0].http.paths |= (
+    map(select(.path as $path | $removed | index($path) == null))
+    | if length == 0
+      then [{path: "/", pathType: "Prefix", backend: {service: {name: "response-404", port: {name: "use-annotation"}}}}]
+      else .
+      end
+  )
   | .metadata.annotations |= del(.[$annotation_key])
 ')
 
