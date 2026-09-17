@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+if [[ "$RULE_PATHS" == "[]" ]]; then
+  echo "Error: the link does not declare any non-empty path"
+  exit 1
+fi
+
 INGRESS_NAME=$(kubectl get ingress -n "$K8S_NAMESPACE" -l "service_id=$SERVICE_ID" -o jsonpath="{.items[0].metadata.name}")
 INGRESS=$(kubectl get ingress -n "$K8S_NAMESPACE" "$INGRESS_NAME" -o json)
 

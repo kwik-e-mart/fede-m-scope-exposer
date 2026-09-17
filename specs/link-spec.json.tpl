@@ -5,13 +5,15 @@
       "properties": {
         "path": {
           "type": "string",
+          "minLength": 1,
           "order": 1
         },
         "additional_paths": {
           "type": "array",
           "title": "Additional Paths",
           "items": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "order": 2
         }
