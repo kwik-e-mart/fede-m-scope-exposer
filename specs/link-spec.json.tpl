@@ -4,7 +4,16 @@
     "schema": {
       "properties": {
         "path": {
-          "type": "string"
+          "type": "string",
+          "order": 1
+        },
+        "additional_paths": {
+          "type": "array",
+          "title": "Additional Paths",
+          "items": {
+            "type": "string"
+          },
+          "order": 2
         }
       },
       "required": [

@@ -22,6 +22,12 @@ SCOPE_SLUG=$(echo "$CONTEXT" | jq -r .tags.scope)
 
 RULE_PATH=$(echo "$CONTEXT" | jq -r '.link.attributes.path // .parameters.path')
 
+RULE_PATHS=$(echo "$CONTEXT" | jq -c '
+  [ (.link.attributes.path // .parameters.path) ]
+  + ((.link.attributes.additional_paths // .parameters.additional_paths) // [])
+  | map(select(. != null and . != ""))
+')
+
 export OUTPUT_DIR="$SERVICE_PATH/output/$SERVICE_NAME-$SERVICE_ID/$ACTION_NAME-$ACTION_ID"
 
 mkdir -p "$OUTPUT_DIR"
@@ -35,3 +41,4 @@ export LINK_NAME
 export SCOPE_ID
 export SCOPE_SLUG
 export RULE_PATH
+export RULE_PATHS
