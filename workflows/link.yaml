@@ -25,7 +25,11 @@ steps:
         type: environment
       - name: SCOPE_ID
         type: environment
+      - name: SCOPE_SLUG
+        type: environment
       - name: RULE_PATH
+        type: environment
+      - name: RULE_PATHS
         type: environment
   - name: "validate_unique_rule"
     type: script
@@ -59,4 +63,4 @@ steps:
     type: script
     file: "$SERVICE_PATH/scripts/update_service"
     configuration:
-      ACTION: add
+      ACTION: sync

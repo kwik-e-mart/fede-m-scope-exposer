@@ -20,7 +20,16 @@ CONTEXT=$(echo "$CONTEXT" | jq \
 SCOPE_ID=$(echo "$CONTEXT" | jq -r .tags.scope_id)
 SCOPE_SLUG=$(echo "$CONTEXT" | jq -r .tags.scope)
 
-RULE_PATH=$(echo "$CONTEXT" | jq -r '.link.attributes.path // .parameters.path')
+STORED_ATTRIBUTES=$(echo "$CONTEXT" | jq -c '.link.attributes // {}')
+SUBMITTED_ATTRIBUTES=$(echo "$CONTEXT" | jq -c '.parameters // {}')
+LINK_ATTRIBUTES=$(jq -nc --argjson stored "$STORED_ATTRIBUTES" --argjson submitted "$SUBMITTED_ATTRIBUTES" '$stored * $submitted')
+
+RULE_PATH=$(echo "$LINK_ATTRIBUTES" | jq -r '.path')
+
+RULE_PATHS=$(echo "$LINK_ATTRIBUTES" | jq -c '
+  [ .path ] + (.additional_paths // [])
+  | map(select(. != null and . != ""))
+')
 
 export OUTPUT_DIR="$SERVICE_PATH/output/$SERVICE_NAME-$SERVICE_ID/$ACTION_NAME-$ACTION_ID"
 
@@ -35,3 +44,4 @@ export LINK_NAME
 export SCOPE_ID
 export SCOPE_SLUG
 export RULE_PATH
+export RULE_PATHS

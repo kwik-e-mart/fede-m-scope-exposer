@@ -13,6 +13,7 @@ metadata:
     alb.ingress.kubernetes.io/load-balancer-name: {{ .alb_name }}
     alb.ingress.kubernetes.io/scheme: {{ .visibility }}
     alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/use-regex-path-match: "true"
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
     alb.ingress.kubernetes.io/ssl-redirect: "443"
     alb.ingress.kubernetes.io/actions.response-404: >-

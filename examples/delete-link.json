@@ -12,7 +12,10 @@
     "created_at": "2025-06-18T13:01:20.207Z",
     "updated_at": "2025-06-18T13:01:20.207Z",
     "parameters": {
-      "path": "/users"
+      "path": "/users",
+      "additional_paths": [
+        "/orders"
+      ]
     },
     "results": {},
     "type": "delete",
@@ -28,6 +31,10 @@
         "rules": [
           {
             "path": "/users",
+            "scope": "public-argentina"
+          },
+          {
+            "path": "/orders",
             "scope": "public-argentina"
           }
         ]
@@ -46,7 +53,10 @@
       "slug": "the-link-name-from-the-user",
       "attributes": {
         "path": "/users",
-        "scope": "dev-us"
+        "scope": "dev-us",
+        "additional_paths": [
+          "/orders"
+        ]
       },
       "specification": {
         "id": "39d2d131-50b5-41b9-a739-1c3edde913ec",
