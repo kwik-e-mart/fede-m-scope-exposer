@@ -17,6 +17,12 @@ echo "Waiting for ingress [$INGRESS_NAME] reconciliation..."
 
 ALB_RECONCILIATION_ENABLED="${ALB_RECONCILIATION_ENABLED:-false}"
 
+if [ "$ALB_RECONCILIATION_ENABLED" != "true" ] && [ "${IS_SERVICE_CREATION:-false}" != "true" ]; then
+    echo "⚠ Skipping verification: the controller aggregates its reconciliation event instead of emitting a new one, so a rule update leaves no event this step can match. Only the ALB can confirm it, which needs ALB_RECONCILIATION_ENABLED=true."
+
+    return 0
+fi
+
 if [ "$ALB_RECONCILIATION_ENABLED" = "true" ]; then
     echo "Validating ALB [$ALB_NAME] configuration for domain [$EXPOSER_DOMAIN]"
 else
