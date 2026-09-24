@@ -25,7 +25,11 @@ steps:
         type: environment
       - name: SCOPE_ID
         type: environment
+      - name: SCOPE_SLUG
+        type: environment
       - name: RULE_PATH
+        type: environment
+      - name: RULE_PATHS
         type: environment
   - name: "build_template"
     type: script

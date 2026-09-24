@@ -1,12 +1,27 @@
 #!/bin/bash
 
-EXISTS=$(echo "$CONTEXT" | jq --arg path "$RULE_PATH" '
-  (.service.attributes.rules // [])
-  | map(select(.path == $path))
-  | length
+set -euo pipefail
+
+DUPLICATED=$(echo "$RULE_PATHS" | jq -r '
+  group_by(.)
+  | map(select(length > 1) | .[0])
+  | join(", ")
 ')
 
-if [[ "$EXISTS" -gt 0 ]]; then
-  echo "Error: A rule with path '$RULE_PATH' already exists."
+if [[ -n "$DUPLICATED" ]]; then
+  echo "Error: the link declares the same path more than once: $DUPLICATED"
+  exit 1
+fi
+
+TAKEN=$(echo "$CONTEXT" | jq -r --argjson paths "$RULE_PATHS" --arg scope "$SCOPE_SLUG" '
+  (.service.attributes.rules // [])
+  | map(select(.scope != $scope))
+  | map(select(.path as $p | $paths | index($p) != null))
+  | map("\(.path) (scope \(.scope))")
+  | join(", ")
+')
+
+if [[ -n "$TAKEN" ]]; then
+  echo "Error: these paths are already published by another scope: $TAKEN"
   exit 1
 fi
