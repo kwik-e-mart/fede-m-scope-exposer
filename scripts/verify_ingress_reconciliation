@@ -17,12 +17,6 @@ echo "Waiting for ingress [$INGRESS_NAME] reconciliation..."
 
 ALB_RECONCILIATION_ENABLED="${ALB_RECONCILIATION_ENABLED:-false}"
 
-if [ "$ALB_RECONCILIATION_ENABLED" = "false" ] && [ "$IS_SERVICE_CREATION" = "false" ]; then
-    echo "⚠ Skipping verification as ALB access needed to validate blue-green and switch traffic reconciliation."
-
-    return 0
-fi
-
 if [ "$ALB_RECONCILIATION_ENABLED" = "true" ]; then
     echo "Validating ALB [$ALB_NAME] configuration for domain [$EXPOSER_DOMAIN]"
 else
@@ -157,39 +151,29 @@ while [ $elapsed -lt $MAX_WAIT_SECONDS ]; do
     event_count=$(echo "$relevant_events" | jq 'length')
 
     if [ "$event_count" -gt 0 ]; then
-        newest_event=$(echo "$relevant_events" | jq -r 'sort_by(.lastTimestamp) | last')
-        event_type=$(echo "$newest_event" | jq -r '.type')
-        event_reason=$(echo "$newest_event" | jq -r '.reason')
-        event_message=$(echo "$newest_event" | jq -r '.message')
+        failures=$(echo "$relevant_events" | jq -c '[.[] | select(.reason | test("^Failed|^ConflictingIngressClass"))]')
 
-        if [ "$event_reason" == "SuccessfullyReconciled" ]; then
+        latest_failure=$(echo "$failures" | jq -r 'sort_by(.lastTimestamp) | last.lastTimestamp // empty')
+        latest_success=$(echo "$relevant_events" | jq -r '[.[] | select(.reason == "SuccessfullyReconciled")] | sort_by(.lastTimestamp) | last.lastTimestamp // empty')
+
+        if [ -n "$latest_failure" ] && { [ -z "$latest_success" ] || [[ "$latest_failure" > "$latest_success" ]]; }; then
+            echo "✗ The ingress could not be reconciled"
+            echo "$failures" | jq -r '.[] | "  - [\(.reason)] \(.message)"'
+
+            if echo "$failures" | grep -q "no certificate found for host"; then
+                echo "Root cause: The ingress hostname does not match any available SSL/TLS certificate"
+                echo "To fix this issue:"
+                echo "  1. Verify the hostname in your ingress matches a certificate in ACM (AWS Certificate Manager)"
+                echo "  2. Check the 'alb.ingress.kubernetes.io/certificate-arn' annotation points to a valid certificate"
+                echo "  3. Ensure the certificate includes the exact hostname or a wildcard that covers it"
+            fi
+
+            exit 1
+        fi
+
+        if [ -n "$latest_success" ] && { [ -z "$latest_failure" ] || [[ "$latest_success" > "$latest_failure" ]]; }; then
             echo "✓ Ingress was successfully reconciled (via event)"
             return 0
-        fi
-
-        if echo "$event_message" | grep -q "no certificate found for host"; then
-            echo "✗ Certificate error detected"
-            echo "Root cause: The ingress hostname does not match any available SSL/TLS certificate"
-            echo "Message: $event_message"
-
-            echo "To fix this issue:"
-            echo "  1. Verify the hostname in your ingress matches a certificate in ACM (AWS Certificate Manager)"
-            echo "  2. Check the 'alb.ingress.kubernetes.io/certificate-arn' annotation points to a valid certificate"
-            echo "  3. Ensure the certificate includes the exact hostname or a wildcard that covers it"
-            exit 1
-        fi
-
-        if [ "$event_type" == "Error" ]; then
-            echo "✗ The ingress could not be reconciled"
-            echo "Error messages:"
-            echo "$relevant_events" | jq -r '.[] | "  - \(.message)"'
-            exit 1
-        fi
-
-        if [ "$event_type" == "Warning" ]; then
-            echo "⚠ There are some potential issues with the ingress"
-            echo "Warning messages:"
-            echo "$relevant_events" | jq -r '.[] | "  - \(.message)"'
         fi
     fi
 

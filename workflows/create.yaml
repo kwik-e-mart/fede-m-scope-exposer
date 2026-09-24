@@ -49,5 +49,3 @@ steps:
       name: wait ingress_reconciliation
       type: script
       file: "$SERVICE_PATH/scripts/verify_ingress_reconciliation"
-      configuration:
-        IS_SERVICE_CREATION: true
