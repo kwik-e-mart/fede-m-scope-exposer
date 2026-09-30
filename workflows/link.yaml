@@ -31,6 +31,8 @@ steps:
         type: environment
       - name: RULE_PATHS
         type: environment
+      - name: PREVIOUS_RULE_PATHS
+        type: environment
   - name: "validate_unique_rule"
     type: script
     file: "$SERVICE_PATH/scripts/validate_unique_rule"

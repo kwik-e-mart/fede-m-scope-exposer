@@ -13,10 +13,9 @@ if [[ -n "$DUPLICATED" ]]; then
   exit 1
 fi
 
-TAKEN=$(echo "$CONTEXT" | jq -r --argjson paths "$RULE_PATHS" --arg scope "$SCOPE_SLUG" '
+TAKEN=$(echo "$CONTEXT" | jq -r --argjson paths "$RULE_PATHS" --argjson previous "$PREVIOUS_RULE_PATHS" '
   (.service.attributes.rules // [])
-  | map(select(.scope != $scope))
-  | map(select(.path as $p | $paths | index($p) != null))
+  | map(select(.path as $path | ($paths | index($path)) != null and ($previous | index($path)) == null))
   | map("\(.path) (scope \(.scope))")
   | join(", ")
 ')

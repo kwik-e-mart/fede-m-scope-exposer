@@ -17,10 +17,8 @@ if [[ "$ANNOTATION" != "null" && -n "$ANNOTATION" ]]; then
   SERVICE=$(echo "$SERVICE" | jq --arg scope_id "$SCOPE_ID" '.name = "bg-deployment-" + $scope_id')
 fi
 
-STALE_PATHS=$(echo "$CONTEXT" | jq -c --arg scope "$SCOPE_SLUG" --argjson desired "$RULE_PATHS" '
-  (.service.attributes.rules // [])
-  | map(select(.scope == $scope) | .path)
-  | map(select(. as $p | $desired | index($p) == null))
+STALE_PATHS=$(jq -nc --argjson previous "$PREVIOUS_RULE_PATHS" --argjson desired "$RULE_PATHS" '
+  $previous | map(select(. as $path | $desired | index($path) == null))
 ')
 
 echo "Publishing paths $RULE_PATHS for scope $SCOPE_ID"

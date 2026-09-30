@@ -31,6 +31,8 @@ steps:
         type: environment
       - name: RULE_PATHS
         type: environment
+      - name: PREVIOUS_RULE_PATHS
+        type: environment
   - name: "build_template"
     type: script
     file: "$SERVICE_PATH/scripts/build_ingress_without_rule"

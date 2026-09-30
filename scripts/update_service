@@ -3,9 +3,11 @@
 set -euo pipefail
 
 if [[ "$ACTION" == "sync" ]]; then
-  UPDATED_ATTRIBUTES=$(echo "$CONTEXT" | jq --argjson paths "$RULE_PATHS" --arg scope "$SCOPE_SLUG" '
+  UPDATED_ATTRIBUTES=$(echo "$CONTEXT" | jq --argjson paths "$RULE_PATHS" --argjson previous "$PREVIOUS_RULE_PATHS" --arg scope "$SCOPE_SLUG" '
     .service.attributes |= (
-      .rules = ((.rules // []) | map(select(.scope != $scope)) + ($paths | map({path: ., scope: $scope})))
+      .rules = ((.rules // [])
+        | map(select(.path as $path | ($previous + $paths) | index($path) == null))
+        + ($paths | map({path: ., scope: $scope})))
     ) |
     {
       attributes: .service.attributes,
@@ -13,9 +15,9 @@ if [[ "$ACTION" == "sync" ]]; then
     }
   ')
 elif [[ "$ACTION" == "remove" ]]; then
-  UPDATED_ATTRIBUTES=$(echo "$CONTEXT" | jq --argjson paths "$RULE_PATHS" --arg scope "$SCOPE_SLUG" '
+  UPDATED_ATTRIBUTES=$(echo "$CONTEXT" | jq --argjson paths "$RULE_PATHS" '
     .service.attributes |= (
-      .rules = ((.rules // []) | map(select(.scope != $scope or (.path as $path | $paths | index($path) == null))))
+      .rules = ((.rules // []) | map(select(.path as $path | $paths | index($path) == null)))
     ) |
     {
       attributes: .service.attributes,
