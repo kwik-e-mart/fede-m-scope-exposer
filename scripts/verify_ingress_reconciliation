@@ -17,8 +17,8 @@ echo "Waiting for ingress [$INGRESS_NAME] reconciliation..."
 
 ALB_RECONCILIATION_ENABLED="${ALB_RECONCILIATION_ENABLED:-false}"
 
-if [ "$ALB_RECONCILIATION_ENABLED" = "false" ] && [ "$IS_SERVICE_CREATION" = "false" ]; then
-    echo "⚠ Skipping verification as ALB access needed to validate blue-green and switch traffic reconciliation."
+if [ "$ALB_RECONCILIATION_ENABLED" != "true" ] && [ "${IS_SERVICE_CREATION:-false}" != "true" ]; then
+    echo "⚠ Skipping verification: the controller aggregates its reconciliation event instead of emitting a new one, so a rule update leaves no event this step can match. Only the ALB can confirm it, which needs ALB_RECONCILIATION_ENABLED=true."
 
     return 0
 fi
@@ -29,24 +29,32 @@ else
     echo "ALB reconciliation disabled, will check cluster events only"
 fi
 
-INGRESS_JSON=$(kubectl get ingress "$INGRESS_NAME" -n "$K8S_NAMESPACE" -o json 2>/dev/null)
+AWS_REGION_EFFECTIVE="${AWS_REGION:-${REGION:-}}"
+if [ "$ALB_RECONCILIATION_ENABLED" = "true" ] && [ -z "$AWS_REGION_EFFECTIVE" ]; then
+    echo "✗ AWS region is not set. Set AWS_REGION (preferred) or REGION to validate against the ALB."
+    return 1
+fi
 
-if [ $? -ne 0 ]; then
-    echo "✗ Failed to get ingress $INGRESS_NAME"
-    exit 1
+if ! INGRESS_JSON=$(kubectl get ingress "$INGRESS_NAME" -n "$K8S_NAMESPACE" -o json 2>/dev/null); then
+    echo "✓ Ingress [$INGRESS_NAME] does not exist, nothing to reconcile"
+    return 0
 fi
 
 current_resource_version=$(echo "$INGRESS_JSON" | jq -r '.metadata.resourceVersion')
 
 if [ "$ALB_RECONCILIATION_ENABLED" = "true" ]; then
-    ALB_ARN=$(aws elbv2 describe-load-balancers \
+    if ! ALB_ARN=$(aws elbv2 describe-load-balancers \
             --names "$ALB_NAME" \
-            --region "$AWS_REGION" \
+            --region "$AWS_REGION_EFFECTIVE" \
             --query 'LoadBalancers[0].LoadBalancerArn' \
-            --output text 2>&1)
+            --output text 2>&1); then
+        echo "✗ Could not describe ALB [$ALB_NAME] in region [$AWS_REGION_EFFECTIVE]"
+        echo "  $ALB_ARN"
+        return 1
+    fi
 
-    if [ $? -ne 0 ] || [ "$ALB_ARN" == "None" ] || [ -z "$ALB_ARN" ]; then
-        echo "⚠ Could not find ALB: $ALB_NAME"
+    if [ "$ALB_ARN" == "None" ] || [ -z "$ALB_ARN" ]; then
+        echo "✗ No ALB named [$ALB_NAME] in region [$AWS_REGION_EFFECTIVE]"
         return 1
     fi
 fi
@@ -54,7 +62,7 @@ fi
 validate_alb_config() {
     LISTENERS=$(aws elbv2 describe-listeners \
         --load-balancer-arn "$ALB_ARN" \
-        --region "$AWS_REGION" \
+        --region "$AWS_REGION_EFFECTIVE" \
         --output json 2>&1)
 
     if [ $? -ne 0 ]; then
@@ -70,7 +78,7 @@ validate_alb_config() {
     for listener_arn in $LISTENER_ARNS; do
         RULES=$(aws elbv2 describe-rules \
             --listener-arn "$listener_arn" \
-            --region "$AWS_REGION" \
+            --region "$AWS_REGION_EFFECTIVE" \
             --output json 2>&1)
 
         if [ $? -ne 0 ]; then
@@ -98,11 +106,15 @@ validate_alb_config() {
 
     echo "  ✓ Found rule for domain: $EXPOSER_DOMAIN"
 
-    EXPECTED_PATHS=$(echo "$EXPECTED_RULES" | jq -r '.[].path // empty' 2>/dev/null)
-    PARAMETER_PATH=$(echo "$CONTEXT" | jq -r '.parameters.path // empty')
-    if [ -n "$PARAMETER_PATH" ]; then
-        EXPECTED_PATHS=$(printf "%s\n%s" "$EXPECTED_PATHS" "$PARAMETER_PATH" | sort -u)
-    fi
+    EXPECTED_PATHS=$(jq -nr \
+        --argjson registry "$(echo "$EXPECTED_RULES" | jq -c '[.[].path // empty]')" \
+        --argjson removed "${PREVIOUS_RULE_PATHS:-[]}" \
+        --argjson declared "${RULE_PATHS:-[]}" '
+        ($registry | map(select(. as $path | $removed | index($path) == null)))
+        + $declared
+        | unique
+        | .[]
+    ')
 
     if [ -z "$EXPECTED_PATHS" ]; then
         echo "✓ Domain rule is configured in ALB"
@@ -157,39 +169,29 @@ while [ $elapsed -lt $MAX_WAIT_SECONDS ]; do
     event_count=$(echo "$relevant_events" | jq 'length')
 
     if [ "$event_count" -gt 0 ]; then
-        newest_event=$(echo "$relevant_events" | jq -r 'sort_by(.lastTimestamp) | last')
-        event_type=$(echo "$newest_event" | jq -r '.type')
-        event_reason=$(echo "$newest_event" | jq -r '.reason')
-        event_message=$(echo "$newest_event" | jq -r '.message')
+        failures=$(echo "$relevant_events" | jq -c '[.[] | select(.reason | test("^Failed|^ConflictingIngressClass"))]')
 
-        if [ "$event_reason" == "SuccessfullyReconciled" ]; then
+        latest_failure=$(echo "$failures" | jq -r 'sort_by(.lastTimestamp) | last.lastTimestamp // empty')
+        latest_success=$(echo "$relevant_events" | jq -r '[.[] | select(.reason == "SuccessfullyReconciled")] | sort_by(.lastTimestamp) | last.lastTimestamp // empty')
+
+        if [ -n "$latest_failure" ] && { [ -z "$latest_success" ] || [[ "$latest_failure" > "$latest_success" ]]; }; then
+            echo "✗ The ingress could not be reconciled"
+            echo "$failures" | jq -r '.[] | "  - [\(.reason)] \(.message)"'
+
+            if echo "$failures" | grep -q "no certificate found for host"; then
+                echo "Root cause: The ingress hostname does not match any available SSL/TLS certificate"
+                echo "To fix this issue:"
+                echo "  1. Verify the hostname in your ingress matches a certificate in ACM (AWS Certificate Manager)"
+                echo "  2. Check the 'alb.ingress.kubernetes.io/certificate-arn' annotation points to a valid certificate"
+                echo "  3. Ensure the certificate includes the exact hostname or a wildcard that covers it"
+            fi
+
+            exit 1
+        fi
+
+        if [ -n "$latest_success" ] && { [ -z "$latest_failure" ] || [[ "$latest_success" > "$latest_failure" ]]; }; then
             echo "✓ Ingress was successfully reconciled (via event)"
             return 0
-        fi
-
-        if echo "$event_message" | grep -q "no certificate found for host"; then
-            echo "✗ Certificate error detected"
-            echo "Root cause: The ingress hostname does not match any available SSL/TLS certificate"
-            echo "Message: $event_message"
-
-            echo "To fix this issue:"
-            echo "  1. Verify the hostname in your ingress matches a certificate in ACM (AWS Certificate Manager)"
-            echo "  2. Check the 'alb.ingress.kubernetes.io/certificate-arn' annotation points to a valid certificate"
-            echo "  3. Ensure the certificate includes the exact hostname or a wildcard that covers it"
-            exit 1
-        fi
-
-        if [ "$event_type" == "Error" ]; then
-            echo "✗ The ingress could not be reconciled"
-            echo "Error messages:"
-            echo "$relevant_events" | jq -r '.[] | "  - \(.message)"'
-            exit 1
-        fi
-
-        if [ "$event_type" == "Warning" ]; then
-            echo "⚠ There are some potential issues with the ingress"
-            echo "Warning messages:"
-            echo "$relevant_events" | jq -r '.[] | "  - \(.message)"'
         fi
     fi
 

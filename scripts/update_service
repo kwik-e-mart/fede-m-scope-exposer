@@ -1,21 +1,32 @@
 #!/bin/bash
 
-if [[ $ACTION == "add" ]]; then
-  UPDATED_ATTRIBUTES=$(echo "$CONTEXT" | jq --arg path "$RULE_PATH" --arg scope "$SCOPE_SLUG" '
-    .service.attributes |= (.rules //= [] | .rules += [{path: $path, scope: $scope}]) |
+set -euo pipefail
+
+if [[ "$ACTION" == "sync" ]]; then
+  UPDATED_ATTRIBUTES=$(echo "$CONTEXT" | jq --argjson paths "$RULE_PATHS" --argjson previous "$PREVIOUS_RULE_PATHS" --arg scope "$SCOPE_SLUG" '
+    .service.attributes |= (
+      .rules = ((.rules // [])
+        | map(select(.path as $path | ($previous + $paths) | index($path) == null))
+        + ($paths | map({path: ., scope: $scope})))
+    ) |
     {
       attributes: .service.attributes,
       entity_nrn: (.entity_nrn | sub(":scope=[^:]+$"; ""))
     }
   ')
-elif [[ $ACTION == "remove" ]]; then
-  UPDATED_ATTRIBUTES=$(echo "$CONTEXT" | jq --arg path "$RULE_PATH" '
-    .service.attributes |= (.rules //= [] | .rules |= map(select(.path != $path))) |
+elif [[ "$ACTION" == "remove" ]]; then
+  UPDATED_ATTRIBUTES=$(echo "$CONTEXT" | jq --argjson paths "$RULE_PATHS" '
+    .service.attributes |= (
+      .rules = ((.rules // []) | map(select(.path as $path | $paths | index($path) == null)))
+    ) |
     {
       attributes: .service.attributes,
       entity_nrn: (.entity_nrn | sub(":scope=[^:]+$"; ""))
     }
   ')
+else
+  echo "Error: unknown ACTION '$ACTION'"
+  exit 1
 fi
 
 np service patch --id "$SERVICE_ID" --body "$UPDATED_ATTRIBUTES"
