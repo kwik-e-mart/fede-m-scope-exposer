@@ -108,11 +108,15 @@ validate_alb_config() {
 
     echo "  ✓ Found rule for domain: $EXPOSER_DOMAIN"
 
-    EXPECTED_PATHS=$(echo "$EXPECTED_RULES" | jq -r '.[].path // empty' 2>/dev/null)
-    PARAMETER_PATH=$(echo "$CONTEXT" | jq -r '.parameters.path // empty')
-    if [ -n "$PARAMETER_PATH" ]; then
-        EXPECTED_PATHS=$(printf "%s\n%s" "$EXPECTED_PATHS" "$PARAMETER_PATH" | sort -u)
-    fi
+    EXPECTED_PATHS=$(jq -nr \
+        --argjson registry "$(echo "$EXPECTED_RULES" | jq -c '[.[].path // empty]')" \
+        --argjson removed "${PREVIOUS_RULE_PATHS:-[]}" \
+        --argjson declared "${RULE_PATHS:-[]}" '
+        ($registry | map(select(. as $path | $removed | index($path) == null)))
+        + $declared
+        | unique
+        | .[]
+    ')
 
     if [ -z "$EXPECTED_PATHS" ]; then
         echo "✓ Domain rule is configured in ALB"
