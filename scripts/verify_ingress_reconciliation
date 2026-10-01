@@ -29,6 +29,12 @@ else
     echo "ALB reconciliation disabled, will check cluster events only"
 fi
 
+AWS_REGION_EFFECTIVE="${AWS_REGION:-${REGION:-}}"
+if [ "$ALB_RECONCILIATION_ENABLED" = "true" ] && [ -z "$AWS_REGION_EFFECTIVE" ]; then
+    echo "✗ AWS region is not set. Set AWS_REGION (preferred) or REGION to validate against the ALB."
+    return 1
+fi
+
 INGRESS_JSON=$(kubectl get ingress "$INGRESS_NAME" -n "$K8S_NAMESPACE" -o json 2>/dev/null)
 
 if [ $? -ne 0 ]; then
@@ -39,14 +45,18 @@ fi
 current_resource_version=$(echo "$INGRESS_JSON" | jq -r '.metadata.resourceVersion')
 
 if [ "$ALB_RECONCILIATION_ENABLED" = "true" ]; then
-    ALB_ARN=$(aws elbv2 describe-load-balancers \
+    if ! ALB_ARN=$(aws elbv2 describe-load-balancers \
             --names "$ALB_NAME" \
-            --region "$AWS_REGION" \
+            --region "$AWS_REGION_EFFECTIVE" \
             --query 'LoadBalancers[0].LoadBalancerArn' \
-            --output text 2>&1)
+            --output text 2>&1); then
+        echo "✗ Could not describe ALB [$ALB_NAME] in region [$AWS_REGION_EFFECTIVE]"
+        echo "  $ALB_ARN"
+        return 1
+    fi
 
-    if [ $? -ne 0 ] || [ "$ALB_ARN" == "None" ] || [ -z "$ALB_ARN" ]; then
-        echo "⚠ Could not find ALB: $ALB_NAME"
+    if [ "$ALB_ARN" == "None" ] || [ -z "$ALB_ARN" ]; then
+        echo "✗ No ALB named [$ALB_NAME] in region [$AWS_REGION_EFFECTIVE]"
         return 1
     fi
 fi
@@ -54,7 +64,7 @@ fi
 validate_alb_config() {
     LISTENERS=$(aws elbv2 describe-listeners \
         --load-balancer-arn "$ALB_ARN" \
-        --region "$AWS_REGION" \
+        --region "$AWS_REGION_EFFECTIVE" \
         --output json 2>&1)
 
     if [ $? -ne 0 ]; then
@@ -70,7 +80,7 @@ validate_alb_config() {
     for listener_arn in $LISTENER_ARNS; do
         RULES=$(aws elbv2 describe-rules \
             --listener-arn "$listener_arn" \
-            --region "$AWS_REGION" \
+            --region "$AWS_REGION_EFFECTIVE" \
             --output json 2>&1)
 
         if [ $? -ne 0 ]; then
