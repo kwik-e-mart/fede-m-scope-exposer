@@ -35,11 +35,9 @@ if [ "$ALB_RECONCILIATION_ENABLED" = "true" ] && [ -z "$AWS_REGION_EFFECTIVE" ];
     return 1
 fi
 
-INGRESS_JSON=$(kubectl get ingress "$INGRESS_NAME" -n "$K8S_NAMESPACE" -o json 2>/dev/null)
-
-if [ $? -ne 0 ]; then
-    echo "✗ Failed to get ingress $INGRESS_NAME"
-    exit 1
+if ! INGRESS_JSON=$(kubectl get ingress "$INGRESS_NAME" -n "$K8S_NAMESPACE" -o json 2>/dev/null); then
+    echo "✓ Ingress [$INGRESS_NAME] does not exist, nothing to reconcile"
+    return 0
 fi
 
 current_resource_version=$(echo "$INGRESS_JSON" | jq -r '.metadata.resourceVersion')
