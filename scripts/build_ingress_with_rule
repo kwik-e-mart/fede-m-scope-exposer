@@ -38,7 +38,7 @@ UPDATED_INGRESS=$(echo "$INGRESS" | jq \
   def rule($path): {path: $path, pathType: "Prefix", backend: {service: $service}};
 
   .spec.rules[0].http.paths |= (
-    map(select(.backend.service.name != "response-404"))
+    map(select(.path != "/" or .backend.service.name != "response-404"))
     | map(select(.path as $path | $stale | index($path) == null))
     | reduce $desired[] as $path (.;
         (map(.path) | index($path)) as $index
