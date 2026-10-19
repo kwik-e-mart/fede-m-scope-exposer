@@ -32,6 +32,8 @@ configuration:
   LOGS_CLOUDWATCH_REGION: "{{ .region }}"
   $: "$" # this is necessary to expand the expression $$ to $
   LINK_SPECIFICATION_ID: b229c8c8-101a-4dab-b0b0-7aa2e23d1bc1
+  EXPOSER_LINK_WAIT_SECONDS: "360"
+  EXPOSER_ACTION_WAIT_SECONDS: "420"
   RECOVERY_SCOPE_SUFFIX: "recovery"
   IAM:
     ENABLED: true

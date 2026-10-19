@@ -22,7 +22,14 @@ SCOPE_SLUG=$(echo "$CONTEXT" | jq -r .tags.scope)
 
 STORED_ATTRIBUTES=$(echo "$CONTEXT" | jq -c 'if .type == "create" then {} else (.link.attributes // {}) end')
 SUBMITTED_ATTRIBUTES=$(echo "$CONTEXT" | jq -c '.parameters // {}')
-LINK_ATTRIBUTES=$(jq -nc --argjson stored "$STORED_ATTRIBUTES" --argjson submitted "$SUBMITTED_ATTRIBUTES" '$stored * $submitted')
+LINK_ATTRIBUTES=$(echo "$CONTEXT" | jq -c --argjson stored "$STORED_ATTRIBUTES" --argjson submitted "$SUBMITTED_ATTRIBUTES" '
+  # Unlink removes what the link persisted, not whatever the delete request submitted.
+  # Refresh re-applies what the link persisted: its workflow skips the uniqueness check,
+  # so a submitted path must never reach it or it would take over the route of another scope.
+  if (.type == "delete" and $stored != {}) or .slug == "refresh" then $stored else $stored * $submitted end
+')
+
+IS_SERVICE_CREATION=$(echo "$CONTEXT" | jq -r '.type == "create"')
 
 RULE_PATH=$(echo "$LINK_ATTRIBUTES" | jq -r '.path')
 
@@ -51,3 +58,4 @@ export SCOPE_SLUG
 export RULE_PATH
 export RULE_PATHS
 export PREVIOUS_RULE_PATHS
+export IS_SERVICE_CREATION

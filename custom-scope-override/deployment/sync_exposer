@@ -1,67 +1,211 @@
 #!/bin/bash
 
-SCOPE_NRN=$(echo "$CONTEXT" | jq -r .scope.nrn)
+EXPOSER_POLL_SECONDS=5
+
+list_exposer_links() {
+  local nrn="$1" limit=200 max_pages=50 offset=0 pages=0 total page page_count links='[]'
+  while true; do
+    if (( pages >= max_pages )); then
+      echo "❌ Link list of $nrn exceeded $max_pages pages of $limit" >&2
+      return 1
+    fi
+    if ! page=$(np link list --nrn "$nrn" --limit "$limit" --offset "$offset" --format json); then
+      echo "❌ Could not list links of $nrn: $page" >&2
+      return 1
+    fi
+    if ! jq -e '.results | type == "array"' <<<"$page" >/dev/null 2>&1; then
+      echo "❌ Invalid link list response for $nrn (offset $offset): $page" >&2
+      return 1
+    fi
+    pages=$((pages + 1))
+    links=$(jq -c --argjson page "$page" '. + $page.results' <<<"$links")
+    page_count=$(jq '.results | length' <<<"$page")
+    total=$(jq -r '.paging.total | if type == "number" then . else empty end' <<<"$page")
+    if (( page_count < limit )); then
+      break
+    fi
+    if [[ -n "$total" ]] && (( offset + limit >= total )); then
+      break
+    fi
+    offset=$((offset + limit))
+  done
+  jq -c --arg spec "$LINK_SPECIFICATION_ID" 'map(select(.specification_id == $spec))' <<<"$links"
+}
+
+read_link_status() {
+  local link_id="$1" response
+  if ! response=$(np link read --id "$link_id" --format json); then
+    if [[ "$response" == *"status 404"* ]]; then
+      echo "gone"
+      return 0
+    fi
+    echo "❌ Could not read link $link_id: $response" >&2
+    return 1
+  fi
+  jq -r '.status // empty' <<<"$response"
+}
+
+wait_link_active() {
+  local link_id="$1" waited=0 status
+  while true; do
+    status=$(read_link_status "$link_id") || return 1
+    echo "Link $link_id is $status after ${waited}s"
+    case "$status" in
+      active) return 0 ;;
+      pending|pending_create|creating|updating) ;;
+      *)
+        echo "❌ Link $link_id of the exposer is $status while waiting for it to be active"
+        return 1
+        ;;
+    esac
+    if (( waited >= EXPOSER_LINK_WAIT_SECONDS )); then
+      echo "❌ Link $link_id of the exposer is still $status after ${waited}s (EXPOSER_LINK_WAIT_SECONDS=$EXPOSER_LINK_WAIT_SECONDS)"
+      return 1
+    fi
+    sleep "$EXPOSER_POLL_SECONDS"
+    waited=$((waited + EXPOSER_POLL_SECONDS))
+  done
+}
+
+wait_link_gone() {
+  local link_id="$1" waited=0 status
+  while true; do
+    status=$(read_link_status "$link_id") || return 1
+    echo "Link $link_id is $status after ${waited}s"
+    case "$status" in
+      gone|deleted|archived)
+        echo "Link $link_id was removed, nothing to synchronize"
+        return 0
+        ;;
+      deleting|archiving) ;;
+      *)
+        echo "❌ Link $link_id of the exposer is $status while waiting for it to be removed"
+        return 1
+        ;;
+    esac
+    if (( waited >= EXPOSER_LINK_WAIT_SECONDS )); then
+      echo "❌ Link $link_id of the exposer is still $status after ${waited}s (EXPOSER_LINK_WAIT_SECONDS=$EXPOSER_LINK_WAIT_SECONDS)"
+      return 1
+    fi
+    sleep "$EXPOSER_POLL_SECONDS"
+    waited=$((waited + EXPOSER_POLL_SECONDS))
+  done
+}
+
+resolve_refresh_action_id() {
+  local actions
+  if [[ -n "$REFRESH_ACTION_ID" ]]; then
+    return 0
+  fi
+  if ! actions=$(np link specification action specification list --linkSpecificationId "$LINK_SPECIFICATION_ID" --format json); then
+    echo "❌ Could not list the action specifications of $LINK_SPECIFICATION_ID: $actions"
+    return 1
+  fi
+  REFRESH_ACTION_ID=$(jq -r '[.results[]? | select(.slug == "refresh")][0].id // empty' <<<"$actions")
+  if [[ -z "$REFRESH_ACTION_ID" ]]; then
+    echo "❌ Link specification $LINK_SPECIFICATION_ID has no refresh action"
+    return 1
+  fi
+}
+
+wait_action() {
+  local link_id="$1" action_id="$2" waited=0 response status
+  while true; do
+    if ! response=$(np link action read --linkId "$link_id" --id "$action_id" --format json); then
+      echo "❌ Could not read action $action_id of link $link_id: $response"
+      return 1
+    fi
+    status=$(jq -r '.status // empty' <<<"$response")
+    echo "Refresh action $action_id of link $link_id is $status after ${waited}s"
+    case "$status" in
+      success)
+        echo "✅ Public ingress synchronized for link $link_id"
+        return 0
+        ;;
+      pending|pending_create|in_progress) ;;
+      failed|cancelled)
+        echo "❌ Refresh action $action_id of link $link_id ended $status"
+        return 1
+        ;;
+      *)
+        echo "❌ Refresh action $action_id of link $link_id has an unexpected status: $response"
+        return 1
+        ;;
+    esac
+    if (( waited >= EXPOSER_ACTION_WAIT_SECONDS )); then
+      echo "❌ Refresh action $action_id of link $link_id is still $status after ${waited}s (EXPOSER_ACTION_WAIT_SECONDS=$EXPOSER_ACTION_WAIT_SECONDS)"
+      return 1
+    fi
+    sleep "$EXPOSER_POLL_SECONDS"
+    waited=$((waited + EXPOSER_POLL_SECONDS))
+  done
+}
+
+run_refresh() {
+  local link_id="$1" attempt response action_id body
+  resolve_refresh_action_id || return 1
+  body="{\"name\": \"refresh\", \"parameters\": {}, \"specification_id\": \"$REFRESH_ACTION_ID\"}"
+  for attempt in 1 2 3; do
+    if response=$(np link action create --linkId "$link_id" --body "$body" --format json); then
+      action_id=$(jq -r '.id // empty' <<<"$response")
+      if [[ -z "$action_id" ]]; then
+        echo "❌ Refresh action of link $link_id was created without an id: $response"
+        return 1
+      fi
+      echo "Created refresh action $action_id for link $link_id"
+      wait_action "$link_id" "$action_id"
+      return
+    fi
+    if [[ "$response" != *"Only active links"* ]]; then
+      echo "❌ Could not create the refresh action of link $link_id: $response"
+      return 1
+    fi
+    echo "Link $link_id stopped being active before the refresh (attempt $attempt), waiting again"
+    wait_link_active "$link_id" || return 1
+  done
+  echo "❌ Link $link_id kept rejecting the refresh after $attempt attempts"
+  return 1
+}
+
+sync_exposer_link() {
+  local link_id="$1" status="$2"
+  echo "Link $link_id of the exposer is $status"
+  case "$status" in
+    active) run_refresh "$link_id" ;;
+    pending|pending_create|creating|updating) wait_link_active "$link_id" && run_refresh "$link_id" ;;
+    deleting|archiving) wait_link_gone "$link_id" ;;
+    deleted|archived) echo "Link $link_id ignored" ;;
+    *)
+      echo "❌ Link $link_id of the exposer is $status"
+      return 1
+      ;;
+  esac
+}
+
+EXPOSER_LINK_WAIT_SECONDS=${EXPOSER_LINK_WAIT_SECONDS-360}
+EXPOSER_ACTION_WAIT_SECONDS=${EXPOSER_ACTION_WAIT_SECONDS-420}
+for wait_var in EXPOSER_LINK_WAIT_SECONDS EXPOSER_ACTION_WAIT_SECONDS; do
+  if [[ ! "${!wait_var}" =~ ^[0-9]+$ ]]; then
+    echo "❌ $wait_var must be a whole number of seconds, got '${!wait_var}'"
+    exit 1
+  fi
+done
+
+SCOPE_NRN=$(jq -r .scope.nrn <<<"$CONTEXT")
+REFRESH_ACTION_ID=""
 
 echo "LINK SPECIFICATION ID: $LINK_SPECIFICATION_ID, SCOPE_NRN: $SCOPE_NRN"
 
-LINKS=$(np link list --nrn "$SCOPE_NRN" --format json --status active)
+EXPOSER_LINKS=$(list_exposer_links "$SCOPE_NRN") || exit 1
 
-EXPOSER_LINKS=$(echo "$LINKS" | jq -c --arg spec "$LINK_SPECIFICATION_ID" '
-  .results
-  | map(select(.specification_id == $spec))
-')
-
-COUNT=$(echo "$EXPOSER_LINKS" | jq 'length')
-
-if [[ "$COUNT" -eq 0 ]]; then
+if [[ "$(jq 'length' <<<"$EXPOSER_LINKS")" -eq 0 ]]; then
   echo "This scope is not public, skipping public ingress synchronization"
-  return
+  return 0
 fi
 
 echo "This is a public scope, starting public ingress synchronization"
 
-ACTIONS=$(np link specification action specification list --linkSpecificationId "$LINK_SPECIFICATION_ID" --format json)
-
-REFRESH_ACTION=$(echo "$ACTIONS" | jq -c '
-  .results
-  | map(select(.slug == "refresh"))
-  | .[0]
-')
-
-REFRESH_ACTION_ID=$(echo "$REFRESH_ACTION" | jq -r .id)
-
-# Iterate over matches
-echo "$EXPOSER_LINKS" | jq -c '.[]' | while read -r link; do
-  # Extract useful values
-  LINK_ID=$(echo "$link" | jq -r '.id')
-
-  ACTION=$(np link action create --linkId "$LINK_ID" --body "{\"name\": \"refresh\", \"parameters\":{}, \"specification_id\": \"$REFRESH_ACTION_ID\"}" --format json)
-  ACTION_ID=$(echo "$ACTION" | jq -r .id)
-
-  echo "Created public ingress synchronization action[id=$ACTION_ID], waiting for its completion"
-
-  MAX_ITERATIONS=20
-  iteration=0
-
-  while true; do
-     ((iteration++))
-      if [ "$iteration" -gt $MAX_ITERATIONS ]; then
-          echo "Error: Maximum number of iterations (${MAX_ITERATIONS}) reached. Could not refresh the exposer."
-          exit 1
-      fi
-
-      ACTION_STATUS=$(np link action read --linkId "$LINK_ID" --id "$ACTION_ID" --format json | jq -r .status)
-
-      echo "Checking public ingress synchronization action[id=$ACTION_ID, status=$ACTION_STATUS]"
-
-      if [[ "$ACTION_STATUS" == "success" ]]; then
-        echo "✅ Public ingress successfully synchronized"
-        break
-      elif [[ "$ACTION_STATUS" == "failed" ]]; then
-        echo "❌ Could not synchronize public ingress, deployment will be rollbacked"
-        exit 1
-      fi
-
-      sleep 5
-  done
+for link_id in $(jq -r '.[].id' <<<"$EXPOSER_LINKS"); do
+  link_status=$(jq -r --arg id "$link_id" '.[] | select((.id | tostring) == $id) | .status' <<<"$EXPOSER_LINKS")
+  sync_exposer_link "$link_id" "$link_status" || exit 1
 done

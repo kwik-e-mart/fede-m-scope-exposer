@@ -1,5 +1,11 @@
 #!/bin/bash
 
-INGRESS_NAME=$(kubectl get ingress -n "$K8S_NAMESPACE" -l "service_id=$SERVICE_ID" -o jsonpath="{.items[0].metadata.name}")
+set -euo pipefail
+
+INGRESS_NAME=$(kubectl get ingress -n "$K8S_NAMESPACE" -l "service_id=$SERVICE_ID" -o jsonpath="{.items[0].metadata.name}" 2>/dev/null || true)
+if [ -z "$INGRESS_NAME" ]; then
+  echo "Error: No ingress found in namespace [$K8S_NAMESPACE] for service_id=[$SERVICE_ID]."
+  exit 1
+fi
 
 kubectl get ingress -n "$K8S_NAMESPACE" "$INGRESS_NAME" -o yaml

@@ -5,20 +5,33 @@ EXPOSER_DOMAIN=$(echo "$CONTEXT" | jq -r '.parameters.domain // .service.attribu
 
 SERVICE_ID=$(echo "$CONTEXT" | jq -r .service.id)
 SERVICE_SLUG=$(echo "$CONTEXT" | jq -r .service.slug)
-EXPECTED_RULES=$(echo "$CONTEXT" | jq '((.service.attributes.rules // []) + (.parameters.rules // [])) | unique')
 
 INGRESS_NAME="k-8-s-$SERVICE_SLUG-$SERVICE_ID-public"
-MAX_WAIT_SECONDS=120
-CHECK_INTERVAL=10
+MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-120}"
+CHECK_INTERVAL="${CHECK_INTERVAL:-10}"
+RECONCILIATION_EXPECTATION="${RECONCILIATION_EXPECTATION-present}"
+EXPECTED_PATHS="${VERIFY_PATHS:-${RULE_PATHS:-[]}}"
 elapsed=0
 
+case "$RECONCILIATION_EXPECTATION" in
+    present|absent) ;;
+    *)
+        echo "✗ Invalid RECONCILIATION_EXPECTATION [$RECONCILIATION_EXPECTATION]: expected present or absent"
+        return 1
+        ;;
+esac
 
-echo "Waiting for ingress [$INGRESS_NAME] reconciliation..."
+if ! jq -e 'type == "array" and all(.[]; type == "string")' <<< "$EXPECTED_PATHS" >/dev/null 2>&1; then
+    echo "✗ Paths to verify must be a JSON array of strings, got [$EXPECTED_PATHS]"
+    return 1
+fi
+
+echo "Waiting for ingress [$INGRESS_NAME] reconciliation (paths $EXPECTED_PATHS expected $RECONCILIATION_EXPECTATION)..."
 
 ALB_RECONCILIATION_ENABLED="${ALB_RECONCILIATION_ENABLED:-false}"
 
 if [ "$ALB_RECONCILIATION_ENABLED" != "true" ] && [ "${IS_SERVICE_CREATION:-false}" != "true" ]; then
-    echo "⚠ Skipping verification: the controller aggregates its reconciliation event instead of emitting a new one, so a rule update leaves no event this step can match. Only the ALB can confirm it, which needs ALB_RECONCILIATION_ENABLED=true."
+    echo "⚠ Skipping verification: ALB_RECONCILIATION_ENABLED is not true, so nothing is verified for paths $EXPECTED_PATHS. The controller aggregates its reconciliation event instead of emitting a new one, so only the ALB can confirm a rule update."
 
     return 0
 fi
@@ -26,21 +39,78 @@ fi
 if [ "$ALB_RECONCILIATION_ENABLED" = "true" ]; then
     echo "Validating ALB [$ALB_NAME] configuration for domain [$EXPOSER_DOMAIN]"
 else
-    echo "ALB reconciliation disabled, will check cluster events only"
+    echo "ALB reconciliation disabled, will check cluster events only: paths $EXPECTED_PATHS are not verified in the ALB"
 fi
 
 AWS_REGION_EFFECTIVE="${AWS_REGION:-${REGION:-}}"
-if [ "$ALB_RECONCILIATION_ENABLED" = "true" ] && [ -z "$AWS_REGION_EFFECTIVE" ]; then
-    echo "✗ AWS region is not set. Set AWS_REGION (preferred) or REGION to validate against the ALB."
+if [ -z "$AWS_REGION_EFFECTIVE" ]; then
+    echo "Error: AWS region is not set. Please set AWS_REGION (preferred) or REGION."
+    exit 1
+fi
+
+if ! INGRESS_JSON=$(kubectl get ingress "$INGRESS_NAME" -n "$K8S_NAMESPACE" -o json --ignore-not-found); then
+    echo "✗ Failed to get ingress [$INGRESS_NAME]"
     return 1
 fi
 
-if ! INGRESS_JSON=$(kubectl get ingress "$INGRESS_NAME" -n "$K8S_NAMESPACE" -o json 2>/dev/null); then
+if [ -z "$INGRESS_JSON" ]; then
     echo "✓ Ingress [$INGRESS_NAME] does not exist, nothing to reconcile"
     return 0
 fi
 
 current_resource_version=$(echo "$INGRESS_JSON" | jq -r '.metadata.resourceVersion')
+
+PATH_EXPECTATIONS="[]"
+
+if [ "$ALB_RECONCILIATION_ENABLED" = "true" ] && ! PATH_EXPECTATIONS=$(jq -c --argjson paths "$EXPECTED_PATHS" --arg mode "$RECONCILIATION_EXPECTATION" '
+    (.metadata.annotations // {}) as $annotations
+    | [.spec.rules[]?.http.paths[]?] as $ingress_paths
+    | def expectation($path):
+        (first($ingress_paths[] | select(.path == $path)) // null) as $entry
+        | if $entry == null then
+            {path: $path, kind: (if $mode == "absent" then "absent" else "error" end), reason: "path is not in the ingress"}
+          elif $mode == "absent" and ($path != "/" or $entry.backend.service.name != "response-404") then
+            {path: $path, kind: "error", reason: "path is still in the ingress"}
+          elif $entry.backend.service.port.name == "use-annotation" then
+            ($annotations["alb.ingress.kubernetes.io/actions." + $entry.backend.service.name] // null) as $raw
+            | (try ($raw | fromjson) catch null) as $action
+            | if $action == null then
+                {path: $path, kind: "error", reason: ("annotation for action [" + $entry.backend.service.name + "] is missing or invalid")}
+              elif $action.type == "forward" then
+                ($action.forwardConfig.targetGroups // $action.targetGroups // []) as $target_groups
+                | if ($target_groups | length) >= 2
+                  then {path: $path, kind: "weights", weights: ($target_groups | map(.weight // 1) | sort)}
+                  else {path: $path, kind: "single"}
+                  end
+              elif $action.type == "fixed-response" then
+                {path: $path, kind: "fixed-response", status: ($action.fixedResponseConfig.statusCode // null)}
+              else
+                {path: $path, kind: "exists"}
+              end
+          else
+            {path: $path, kind: "single"}
+          end;
+    ($paths | unique) as $declared
+    | (if $mode == "absent"
+        and any($ingress_paths[]; .path == "/" and .backend.service.name == "response-404")
+        and ($declared | index("/")) == null
+       then $declared + ["/"] else $declared end)
+    | map(expectation(.))
+' <<< "$INGRESS_JSON"); then
+    echo "✗ Could not read the expected backends from ingress [$INGRESS_NAME]"
+    return 1
+fi
+
+if jq -e 'any(.[]; .kind == "error")' <<< "$PATH_EXPECTATIONS" >/dev/null; then
+    echo "✗ Cannot verify the ALB for ingress [$INGRESS_NAME]:"
+    jq -r '.[] | select(.kind == "error") | "  - \(.path): \(.reason)"' <<< "$PATH_EXPECTATIONS"
+    return 1
+fi
+
+if [ "$RECONCILIATION_EXPECTATION" = "absent" ] && [ "$PATH_EXPECTATIONS" = "[]" ]; then
+    echo "✓ No paths to verify as removed"
+    return 0
+fi
 
 if [ "$ALB_RECONCILIATION_ENABLED" = "true" ]; then
     if ! ALB_ARN=$(aws elbv2 describe-load-balancers \
@@ -60,99 +130,128 @@ if [ "$ALB_RECONCILIATION_ENABLED" = "true" ]; then
 fi
 
 validate_alb_config() {
-    LISTENERS=$(aws elbv2 describe-listeners \
-        --load-balancer-arn "$ALB_ARN" \
-        --region "$AWS_REGION_EFFECTIVE" \
-        --output json 2>&1)
+    local listeners listener_arns listener_arn rules all_rules results
 
-    if [ $? -ne 0 ]; then
-        echo "⚠ Could not get listeners for ALB"
+    if ! listeners=$(aws elbv2 describe-listeners \
+            --load-balancer-arn "$ALB_ARN" \
+            --region "$AWS_REGION_EFFECTIVE" \
+            --output json 2>&1); then
+        echo "✗ Could not get listeners for ALB [$ALB_NAME]"
+        echo "  $listeners"
         return 1
     fi
+
+    if ! listener_arns=$(jq -r '.Listeners[].ListenerArn' <<< "$listeners"); then
+        echo "✗ Could not parse listeners for ALB [$ALB_NAME]"
+        return 1
+    fi
+
+    all_rules="[]"
+    for listener_arn in $listener_arns; do
+        if ! rules=$(aws elbv2 describe-rules \
+                --listener-arn "$listener_arn" \
+                --region "$AWS_REGION_EFFECTIVE" \
+                --output json 2>&1); then
+            echo "✗ Could not get rules for listener [$listener_arn]"
+            echo "  $rules"
+            return 1
+        fi
+
+        if ! all_rules=$(printf '%s\n%s' "$all_rules" "$rules" | jq -sc '.[0] + .[1].Rules'); then
+            echo "✗ Could not parse rules for listener [$listener_arn]"
+            return 1
+        fi
+    done
 
     echo "Checking domain: $EXPOSER_DOMAIN"
 
-    LISTENER_ARNS=$(echo "$LISTENERS" | jq -r '.Listeners[].ListenerArn')
-
-    ALL_ALB_RULES=""
-    for listener_arn in $LISTENER_ARNS; do
-        RULES=$(aws elbv2 describe-rules \
-            --listener-arn "$listener_arn" \
-            --region "$AWS_REGION_EFFECTIVE" \
-            --output json 2>&1)
-
-        if [ $? -ne 0 ]; then
-            continue
+    if [ "$PATH_EXPECTATIONS" = "[]" ]; then
+        if jq -e --arg domain "$EXPOSER_DOMAIN" '
+            any(.[]; [.Conditions[]? | select(.Field == "host-header") | ((.Values // []) + (.HostHeaderConfig.Values // []))[]] | index($domain) != null)
+        ' <<< "$all_rules" >/dev/null; then
+            echo "✓ Domain rule is configured in ALB"
+            return 0
         fi
 
-        ALL_ALB_RULES="${ALL_ALB_RULES}$(echo "$RULES" | jq -c '.Rules[]')"
-    done
-
-    if [ -z "$ALL_ALB_RULES" ]; then
-        echo "  ✗ No ALB rules found"
-        return 1
-    fi
-
-    DOMAIN_RULE=$(echo "$ALL_ALB_RULES" | jq -s --arg domain "$EXPOSER_DOMAIN" '
-        .[] | select(
-            .Conditions[]? | select(.Field == "host-header") | .Values[]? == $domain
-        )
-    ' 2>/dev/null)
-
-    if [ -z "$DOMAIN_RULE" ]; then
         echo "  ✗ Domain not found in ALB rules: $EXPOSER_DOMAIN"
+        return 2
+    fi
+
+    if ! results=$(jq -c --arg domain "$EXPOSER_DOMAIN" --argjson expectations "$PATH_EXPECTATIONS" '
+        def condition_values($field):
+            [.Conditions[]? | select(.Field == $field)
+             | ((.Values // []) + (.HostHeaderConfig.Values // []) + (.PathPatternConfig.Values // []))[]];
+        def path_patterns($path):
+            if $path == "/" then ["/*"] else ($path | sub("/+$"; "")) as $base | [$base, $base + "/*"] end;
+        def target_groups:
+            [.Actions[]? | select(.Type == "forward")
+             | (.ForwardConfig.TargetGroups // (if .TargetGroupArn then [{TargetGroupArn: .TargetGroupArn}] else [] end))[]];
+        def weights: [target_groups[] | .Weight // 1] | sort;
+        def fmt: map(tostring) | join("/");
+        . as $rules
+        | $expectations
+        | map(
+            . as $expected
+            | [$rules[]
+               | select(condition_values("host-header") | index($domain) != null)
+               | select(condition_values("path-pattern") as $values | any(path_patterns($expected.path)[]; . as $p | $values | index($p) != null))
+               | select([.Actions[]?.Type] | index("redirect") == null)] as $matching
+            | if $expected.kind == "absent" then
+                if ($matching | length) == 0
+                then {path: $expected.path, ok: true, detail: "removed from ALB"}
+                else {path: $expected.path, ok: false, detail: "still present in ALB"}
+                end
+              elif ($matching | length) == 0 then
+                {path: $expected.path, ok: false, detail: "missing rule"}
+              elif $expected.kind == "single" then
+                ($matching | map(target_groups | length)) as $counts
+                | if all($counts[]; . == 1)
+                  then {path: $expected.path, ok: true, detail: "single target group"}
+                  else {path: $expected.path, ok: false, detail: "expected 1 target group, found \($counts | fmt)"}
+                  end
+              elif $expected.kind == "weights" then
+                ($matching | map(weights)) as $actual
+                | if all($actual[]; . == $expected.weights)
+                  then {path: $expected.path, ok: true, detail: "weights \($expected.weights | fmt)"}
+                  else {path: $expected.path, ok: false, detail: "weights mismatch: expected=\($expected.weights | fmt) actual=\($actual | map(fmt) | join(","))"}
+                  end
+              elif $expected.kind == "fixed-response" then
+                if all($matching[]; any(.Actions[]?; .Type == "fixed-response" and ($expected.status == null or .FixedResponseConfig.StatusCode == $expected.status)))
+                then {path: $expected.path, ok: true, detail: "fixed response \($expected.status // "")"}
+                else {path: $expected.path, ok: false, detail: "expected fixed response \($expected.status // "")"}
+                end
+              else
+                {path: $expected.path, ok: true, detail: "rule present"}
+              end
+          )
+    ' <<< "$all_rules"); then
+        echo "✗ Could not evaluate ALB rules"
         return 1
     fi
 
-    echo "  ✓ Found rule for domain: $EXPOSER_DOMAIN"
+    jq -r '.[] | "  \(if .ok then "✓" else "✗" end) \(.path): \(.detail)"' <<< "$results"
 
-    EXPECTED_PATHS=$(jq -nr \
-        --argjson registry "$(echo "$EXPECTED_RULES" | jq -c '[.[].path // empty]')" \
-        --argjson removed "${PREVIOUS_RULE_PATHS:-[]}" \
-        --argjson declared "${RULE_PATHS:-[]}" '
-        ($registry | map(select(. as $path | $removed | index($path) == null)))
-        + $declared
-        | unique
-        | .[]
-    ')
-
-    if [ -z "$EXPECTED_PATHS" ]; then
-        echo "✓ Domain rule is configured in ALB"
+    if jq -e 'all(.[]; .ok)' <<< "$results" >/dev/null; then
+        echo "✓ All expected rules are reconciled in ALB"
         return 0
     fi
 
-    all_rules_found=true
-
-    for expected_path in $EXPECTED_PATHS; do
-        MATCHING_RULE=$(echo "$ALL_ALB_RULES" | jq -s --arg domain "$EXPOSER_DOMAIN" --arg path "$expected_path" '
-            .[] | select(
-                (.Conditions[]? | select(.Field == "host-header") | .Values[]? == $domain) and
-                (.Conditions[]? | select(.Field == "path-pattern") | .Values[]? | startswith($path))
-            )
-        ' 2>/dev/null)
-
-        if [ -n "$MATCHING_RULE" ]; then
-            echo "  ✓ Found rule for path: $expected_path"
-        else
-            echo "  ✗ Missing rule for path: $expected_path"
-            all_rules_found=false
-        fi
-    done
-
-    if [ "$all_rules_found" = true ]; then
-        echo "✓ All expected rules are configured in ALB"
-        return 0
-    else
-        echo "⚠ Some rules are missing from ALB configuration"
-        return 1
-    fi
+    echo "⚠ The ALB does not reflect the expected rules yet"
+    return 2
 }
 
-while [ $elapsed -lt $MAX_WAIT_SECONDS ]; do
+while [ "$elapsed" -lt "$MAX_WAIT_SECONDS" ]; do
     if [ "$ALB_RECONCILIATION_ENABLED" = "true" ]; then
         if validate_alb_config; then
             echo "✓ ALB configuration validated successfully"
             return 0
+        else
+            alb_status=$?
+        fi
+
+        if [ "$alb_status" -ne 2 ]; then
+            echo "✗ ALB verification failed"
+            return 1
         fi
 
         echo "ALB validation incomplete, checking Kubernetes events..."
@@ -190,13 +289,17 @@ while [ $elapsed -lt $MAX_WAIT_SECONDS ]; do
         fi
 
         if [ -n "$latest_success" ] && { [ -z "$latest_failure" ] || [[ "$latest_success" > "$latest_failure" ]]; }; then
-            echo "✓ Ingress was successfully reconciled (via event)"
-            return 0
+            if [ "$ALB_RECONCILIATION_ENABLED" = "true" ]; then
+                echo "Ingress reported as reconciled, but the ALB does not reflect the expected rules yet"
+            else
+                echo "✓ Ingress was successfully reconciled (via event)"
+                return 0
+            fi
         fi
     fi
 
     echo "Waiting for ALB reconciliation... (${elapsed}s/${MAX_WAIT_SECONDS}s)"
-    sleep $CHECK_INTERVAL
+    sleep "$CHECK_INTERVAL"
     elapsed=$((elapsed + CHECK_INTERVAL))
 done
 

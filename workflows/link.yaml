@@ -33,6 +33,8 @@ steps:
         type: environment
       - name: PREVIOUS_RULE_PATHS
         type: environment
+      - name: IS_SERVICE_CREATION
+        type: environment
   - name: "validate_unique_rule"
     type: script
     file: "$SERVICE_PATH/scripts/validate_unique_rule"
@@ -59,8 +61,6 @@ steps:
       name: wait ingress_reconciliation
       type: script
       file: "$SERVICE_PATH/scripts/verify_ingress_reconciliation"
-      configuration:
-        IS_SERVICE_CREATION: false
   - name: "add_rule_to_service"
     type: script
     file: "$SERVICE_PATH/scripts/update_service"

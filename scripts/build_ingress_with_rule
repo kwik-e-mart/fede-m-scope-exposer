@@ -7,7 +7,19 @@ if [[ "$RULE_PATHS" == "[]" ]]; then
   exit 1
 fi
 
-INGRESS_NAME=$(kubectl get ingress -n "$K8S_NAMESPACE" -l "service_id=$SERVICE_ID" -o jsonpath="{.items[0].metadata.name}")
+INGRESS_NAME=$(kubectl get ingress -n "$K8S_NAMESPACE" -l "service_id=$SERVICE_ID" -o jsonpath="{.items[0].metadata.name}" 2>/dev/null || true)
+if [ -z "$INGRESS_NAME" ]; then
+  if [ -n "${SERVICE_NAME:-}" ]; then
+    EXPECTED_INGRESS_NAME="k-8-s-${SERVICE_NAME}-${SERVICE_ID}-public"
+    if kubectl get ingress -n "$K8S_NAMESPACE" "$EXPECTED_INGRESS_NAME" >/dev/null 2>&1; then
+      INGRESS_NAME="$EXPECTED_INGRESS_NAME"
+    fi
+  fi
+fi
+if [ -z "$INGRESS_NAME" ]; then
+  echo "Error: No ingress found in namespace [$K8S_NAMESPACE] for service_id=[$SERVICE_ID]. Expected an existing ingress to patch (e.g. created by workflow create.yaml)."
+  exit 1
+fi
 INGRESS=$(kubectl get ingress -n "$K8S_NAMESPACE" "$INGRESS_NAME" -o json)
 
 ANNOTATION=$(echo "$SCOPE_RULE" | jq -r .blue_green_annotation)
