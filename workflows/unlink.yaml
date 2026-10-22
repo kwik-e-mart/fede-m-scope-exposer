@@ -33,6 +33,11 @@ steps:
         type: environment
       - name: PREVIOUS_RULE_PATHS
         type: environment
+  - name: "lease"
+    type: script
+    file: "$SERVICE_PATH/scripts/lease"
+    configuration:
+      LEASE_ACTION: acquire
   - name: "build_template"
     type: script
     file: "$SERVICE_PATH/scripts/build_ingress_without_rule"
@@ -42,16 +47,14 @@ steps:
         file: "$OUTPUT_DIR/ingress-$SERVICE_ID-$SCOPE_ID-public.yaml"
   - name: apply
     type: script
-    file: "$SERVICE_PATH/scripts/apply"
+    file: "$SERVICE_PATH/scripts/apply_and_verify"
     configuration:
-      ACTION: apply
-      DRY_RUN: false
-    post:
-      name: wait ingress_reconciliation
-      type: script
-      file: "$SERVICE_PATH/scripts/verify_ingress_reconciliation"
-      configuration:
-        RECONCILIATION_EXPECTATION: absent
+      RECONCILIATION_EXPECTATION: absent
+  - name: "last_good"
+    type: script
+    file: "$SERVICE_PATH/scripts/last_good"
+    configuration:
+      LAST_GOOD_ACTION: save
   - name: "add_rule_to_service"
     type: script
     file: "$SERVICE_PATH/scripts/update_service"

@@ -1,0 +1,246 @@
+#!/bin/bash
+
+LEASE_DURATION_SECONDS=150
+LEASE_CHECK_INTERVAL=5
+
+lease_name() {
+  echo "exposer-$SERVICE_ID"
+}
+
+lease_now() {
+  date -u +%s
+}
+
+lease_kubectl() {
+  local reason="$1" errors output message rc=0
+  shift
+  if ! errors=$(mktemp); then
+    echo "Error: could not create a temporary file for kubectl $1" >&2
+    return 1
+  fi
+  output=$(kubectl "$@" 2>"$errors" </dev/null) || rc=$?
+  message=$(<"$errors")
+  rm -f "$errors"
+  if (( rc == 0 )); then
+    printf '%s\n' "$output"
+    return 0
+  fi
+  if [[ "$message" == *"($reason)"* ]]; then
+    return 2
+  fi
+  echo "${message:-kubectl exited with $rc}" >&2
+  return 1
+}
+
+lease_get() {
+  lease_kubectl NotFound get lease "$(lease_name)" -n "$K8S_NAMESPACE" -o json
+}
+
+lease_state() {
+  jq -r '[
+    ((.spec.renewTime // .spec.acquireTime // "1970-01-01T00:00:00Z") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) + (.spec.leaseDurationSeconds // 0),
+    (.spec.leaseTransitions // 0),
+    .metadata.resourceVersion,
+    (.spec.holderIdentity // "")
+  ] | @tsv' <<<"$1"
+}
+
+lease_skeleton() {
+  jq -n --arg name "$(lease_name)" --arg namespace "$K8S_NAMESPACE" --arg service_id "$SERVICE_ID" '{
+    apiVersion: "coordination.k8s.io/v1",
+    kind: "Lease",
+    metadata: {name: $name, namespace: $namespace, labels: {nullplatform: "true", service_id: $service_id}}
+  }'
+}
+
+lease_hold() {
+  jq --arg holder "$ACTION_ID" --argjson transitions "$2" --argjson duration "$LEASE_DURATION_SECONDS" \
+    --arg time "$(jq -nr --argjson now "$3" '$now | strftime("%Y-%m-%dT%H:%M:%S.000000Z")')" '
+    del(.metadata.managedFields)
+    | .spec = (.spec // {}) + {holderIdentity: $holder, leaseDurationSeconds: $duration, acquireTime: $time, renewTime: $time, leaseTransitions: $transitions}' <<<"$1"
+}
+
+lease_taken() {
+  LEASE_TOKEN="$1"
+  export LEASE_TOKEN
+  trap lease_release EXIT
+  echo "✓ Took the Lease $(lease_name) for ${LEASE_DURATION_SECONDS}s (token $LEASE_TOKEN)"
+}
+
+lease_acquire() {
+  local wait="${EXPOSER_LEASE_WAIT_SECONDS-180}" file now deadline lease state expires transitions resource_version holder waiting_for="" rc
+  if [[ ! "$wait" =~ ^[0-9]+$ ]]; then
+    echo "Error: EXPOSER_LEASE_WAIT_SECONDS must be a whole number of seconds, got '$wait'"
+    return 1
+  fi
+  file="$OUTPUT_DIR/$(lease_name)-acquire.json"
+  now=$(lease_now)
+  deadline=$((now + wait))
+  while true; do
+    rc=0
+    lease=$(lease_get) || rc=$?
+    if (( rc == 1 )); then
+      echo "Error: could not read the Lease $(lease_name) in namespace $K8S_NAMESPACE"
+      return 1
+    fi
+    if (( rc == 2 )); then
+      lease_hold "$(lease_skeleton)" 1 "$now" > "$file"
+      rc=0
+      lease_kubectl AlreadyExists create -f "$file" >/dev/null || rc=$?
+      if (( rc == 0 )); then
+        lease_taken 1
+        return 0
+      fi
+      if (( rc == 1 )); then
+        echo "Error: could not create the Lease $(lease_name)"
+        return 1
+      fi
+      echo "The Lease $(lease_name) was created by another action meanwhile; reading it again"
+      continue
+    fi
+    if ! state=$(lease_state "$lease"); then
+      echo "Error: invalid Lease $(lease_name): $lease"
+      return 1
+    fi
+    IFS=$'\t' read -r expires transitions resource_version holder <<<"$state"
+    if [[ -z "$holder" || "$holder" == "$ACTION_ID" ]] || (( expires <= now )); then
+      if [[ -n "$holder" && "$holder" != "$ACTION_ID" ]]; then
+        echo "The Lease $(lease_name) held by action $holder expired $((now - expires))s ago; taking it"
+      fi
+      lease_hold "$lease" $((transitions + 1)) "$now" > "$file"
+      rc=0
+      lease_kubectl Conflict replace -f "$file" >/dev/null || rc=$?
+      if (( rc == 0 )); then
+        lease_taken $((transitions + 1))
+        return 0
+      fi
+      if (( rc == 1 )); then
+        echo "Error: could not take the Lease $(lease_name)"
+        return 1
+      fi
+      echo "The Lease $(lease_name) changed meanwhile; reading it again"
+    else
+      if (( now >= deadline )); then
+        echo "Error: the Lease $(lease_name) is still held by action $holder after ${wait}s (EXPOSER_LEASE_WAIT_SECONDS). Nothing was changed; retry when that action ends."
+        return 1
+      fi
+      if [[ "$holder" != "$waiting_for" ]]; then
+        echo "The Lease $(lease_name) is held by action $holder for $((expires - now))s more; waiting up to $((deadline - now))s"
+        waiting_for="$holder"
+      fi
+      sleep "$LEASE_CHECK_INTERVAL"
+    fi
+    now=$(lease_now)
+  done
+}
+
+lease_remaining() {
+  local lease state rc=0 expires transitions resource_version holder
+  lease=$(lease_get) || rc=$?
+  if (( rc == 2 )); then
+    echo "Error: the Lease $(lease_name) does not exist" >&2
+    return 1
+  fi
+  if (( rc != 0 )); then
+    echo "Error: could not read the Lease $(lease_name)" >&2
+    return 1
+  fi
+  if ! state=$(lease_state "$lease"); then
+    echo "Error: invalid Lease $(lease_name): $lease" >&2
+    return 1
+  fi
+  IFS=$'\t' read -r expires transitions resource_version holder <<<"$state"
+  if [[ "$holder" != "$ACTION_ID" ]]; then
+    echo "Error: the Lease $(lease_name) is held by ${holder:-nobody}, not by this action" >&2
+    return 1
+  fi
+  echo $((expires - $(lease_now)))
+}
+
+lease_assert_held() {
+  local needed="$1" remaining
+  if ! remaining=$(lease_remaining); then
+    echo "Nothing was written; run restore-ingress to return the ingress to the last good snapshot."
+    return 1
+  fi
+  if (( remaining < needed )); then
+    if (( remaining < 0 )); then
+      remaining=0
+    fi
+    echo "Error: the Lease $(lease_name) has ${remaining}s left and this write needs ${needed}s. Nothing was written; run restore-ingress to return the ingress to the last good snapshot."
+    return 1
+  fi
+}
+
+lease_budget() {
+  local limit="$1" remaining
+  if ! remaining=$(lease_remaining); then
+    return 1
+  fi
+  remaining=$((remaining - 10))
+  if (( remaining < limit )); then
+    limit="$remaining"
+  fi
+  if (( limit < 0 )); then
+    limit=0
+  fi
+  echo "$limit"
+}
+
+lease_release() {
+  local lease state rc=0 expires transitions resource_version holder file
+  lease=$(lease_get 2>/dev/null) || rc=$?
+  if (( rc != 0 )) || ! state=$(lease_state "$lease" 2>/dev/null); then
+    return 0
+  fi
+  IFS=$'\t' read -r expires transitions resource_version holder <<<"$state"
+  if [[ "$holder" != "$ACTION_ID" ]]; then
+    return 0
+  fi
+  file="$OUTPUT_DIR/$(lease_name)-release.json"
+  if ! jq 'del(.metadata.managedFields) | .spec.holderIdentity = ""' <<<"$lease" > "$file" \
+    || ! lease_kubectl Conflict replace -f "$file" >/dev/null 2>&1; then
+    echo "⚠ Could not release the Lease $(lease_name); it expires on its own"
+  fi
+  return 0
+}
+
+lease_delete() {
+  if ! kubectl delete lease "$(lease_name)" -n "$K8S_NAMESPACE" --ignore-not-found; then
+    echo "Error: could not delete the Lease $(lease_name)"
+    return 1
+  fi
+}
+
+lease_main() {
+  case "${LEASE_ACTION-}" in
+    acquire)
+      lease_acquire
+      ;;
+    delete)
+      lease_delete
+      ;;
+    *)
+      echo "Error: LEASE_ACTION must be acquire or delete, got '${LEASE_ACTION-}'"
+      return 1
+      ;;
+  esac
+}
+
+case "${LEASE_LIB_ONLY-false}" in
+  true)
+    return 0
+    ;;
+  false)
+    ;;
+  *)
+    echo "Error: LEASE_LIB_ONLY must be true or false, got '$LEASE_LIB_ONLY'"
+    exit 1
+    ;;
+esac
+
+set -euo pipefail
+
+if ! lease_main; then
+  exit 1
+fi

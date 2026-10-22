@@ -1,0 +1,31 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SERVICE_ID=$(echo "$CONTEXT" | jq -r .service.id)
+SERVICE_NAME=$(echo "$CONTEXT" | jq -r .service.slug)
+SERVICE_DOMAIN=$(echo "$CONTEXT" | jq -r '.service.attributes.domain // empty')
+
+ACTION_ID=$(echo "$CONTEXT" | jq -r .id)
+ACTION_NAME=$(echo "$CONTEXT" | jq -r .slug)
+
+if [[ -z "$SERVICE_DOMAIN" ]]; then
+  echo "Error: service $SERVICE_ID has no domain in its attributes"
+  exit 1
+fi
+
+CONTEXT=$(echo "$CONTEXT" | jq \
+          --arg k8s_namespace "$K8S_NAMESPACE" \
+          --arg alb_name "$ALB_NAME" \
+          --arg visibility "$VISIBILITY" \
+          '. + {k8s_namespace: $k8s_namespace, alb_name: $alb_name, visibility: $visibility}')
+
+export OUTPUT_DIR="$SERVICE_PATH/output/$SERVICE_NAME-$SERVICE_ID/$ACTION_NAME-$ACTION_ID"
+
+mkdir -p "$OUTPUT_DIR"
+
+export SERVICE_ID
+export SERVICE_NAME
+export SERVICE_DOMAIN
+export ACTION_ID
+export ACTION_NAME

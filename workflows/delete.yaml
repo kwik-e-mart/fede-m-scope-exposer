@@ -4,3 +4,11 @@ steps:
   - name: apply
     configuration:
       ACTION: delete
+  - name: "last_good"
+    configuration:
+      LAST_GOOD_ACTION: delete
+  - name: "delete lease"
+    type: script
+    file: "$SERVICE_PATH/scripts/lease"
+    configuration:
+      LEASE_ACTION: delete

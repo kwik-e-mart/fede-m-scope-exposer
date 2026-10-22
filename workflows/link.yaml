@@ -35,6 +35,11 @@ steps:
         type: environment
       - name: IS_SERVICE_CREATION
         type: environment
+  - name: "lease"
+    type: script
+    file: "$SERVICE_PATH/scripts/lease"
+    configuration:
+      LEASE_ACTION: acquire
   - name: "validate_unique_rule"
     type: script
     file: "$SERVICE_PATH/scripts/validate_unique_rule"
@@ -51,16 +56,17 @@ steps:
       - name: INGRESS_FILE
         type: file
         file: "$OUTPUT_DIR/ingress-$SERVICE_ID-$SCOPE_ID-public.yaml"
+  - name: "validate_references"
+    type: script
+    file: "$SERVICE_PATH/scripts/validate_references"
   - name: apply
     type: script
-    file: "$SERVICE_PATH/scripts/apply"
+    file: "$SERVICE_PATH/scripts/apply_and_verify"
+  - name: "last_good"
+    type: script
+    file: "$SERVICE_PATH/scripts/last_good"
     configuration:
-      ACTION: apply
-      DRY_RUN: false
-    post:
-      name: wait ingress_reconciliation
-      type: script
-      file: "$SERVICE_PATH/scripts/verify_ingress_reconciliation"
+      LAST_GOOD_ACTION: save
   - name: "add_rule_to_service"
     type: script
     file: "$SERVICE_PATH/scripts/update_service"

@@ -1,0 +1,228 @@
+#!/bin/bash
+
+REBUILD_INGRESS_PAGE_SIZE=200
+REBUILD_INGRESS_404_BACKEND='{"service":{"name":"response-404","port":{"name":"use-annotation"}},"annotation":null}'
+
+rebuild_ingress_load() {
+  local dir
+  dir="$(dirname "${BASH_SOURCE[0]}")"
+  if ! LAST_GOOD_LIB_ONLY=true source "$dir/last_good" || ! VALIDATE_REFERENCES_LIB_ONLY=true source "$dir/validate_references"; then
+    echo "Error: could not load last_good and validate_references from $dir"
+    return 1
+  fi
+}
+
+rebuild_ingress_list_links() {
+  local offset=0 page count account_nrn
+  account_nrn=$(jq -r '.entity_nrn // empty' <<<"$CONTEXT")
+  account_nrn="${account_nrn%%:namespace=*}"
+  while true; do
+    if ! page=$(np link list --nrn "$account_nrn" --show-descendants --service-id "$SERVICE_ID" --limit "$REBUILD_INGRESS_PAGE_SIZE" --offset "$offset" --format json); then
+      echo "Error: could not list the links of service $SERVICE_ID: $page" >&2
+      return 1
+    fi
+    if ! count=$(jq -e '.results | arrays | length' <<<"$page" 2>/dev/null); then
+      echo "Error: invalid link list response for service $SERVICE_ID: $page" >&2
+      return 1
+    fi
+    jq -r '.results[] | [
+      .id,
+      (.slug // .id),
+      (.status // "-"),
+      (.entity_nrn // "-"),
+      ([.attributes.path] + (.attributes.additional_paths // []) | map(select(. != null and . != "")) | tojson)
+    ] | @tsv' <<<"$page"
+    if (( count < REBUILD_INGRESS_PAGE_SIZE )); then
+      return 0
+    fi
+    offset=$((offset + REBUILD_INGRESS_PAGE_SIZE))
+  done
+}
+
+rebuild_ingress_duplicate_paths() {
+  awk -F'\t' '
+    { links[$1] = ($1 in links) ? links[$1] ", " $2 : $2; count[$1]++ }
+    END { for (path in count) if (count[path] > 1) print "  " path ": " links[path] }' | LC_ALL=C sort
+}
+
+rebuild_ingress_scope_slug() {
+  local scope_id="$1" scope
+  if ! scope=$(np scope read --id "$scope_id" --format json); then
+    echo "Error: could not read scope $scope_id: $scope" >&2
+    return 1
+  fi
+  if ! jq -er '.slug | strings' <<<"$scope" 2>/dev/null; then
+    echo "Error: invalid response reading scope $scope_id: $scope" >&2
+    return 1
+  fi
+}
+
+rebuild_ingress_scope_backend() {
+  local scope_id="$1" ingresses
+  if ! ingresses=$(kubectl get ingress -n "$K8S_NAMESPACE" -l "scope_id=$scope_id" -o json); then
+    echo "Error: could not read the ingresses of scope $scope_id" >&2
+    return 1
+  fi
+  if [[ "$(jq '.items | length' <<<"$ingresses")" == "0" ]]; then
+    echo "There is no ingress for scope $scope_id. Publishing its paths with response-404" >&2
+    echo "$REBUILD_INGRESS_404_BACKEND"
+    return 0
+  fi
+  jq -c '.items[0] | {
+    annotation: .metadata.annotations["alb.ingress.kubernetes.io/actions.bg-deployment"],
+    service: .spec.rules[0].http.paths[0].backend.service
+  }' <<<"$ingresses"
+}
+
+rebuild_ingress_link_rule() {
+  jq -nc --arg scope_id "$1" --argjson paths "$2" --argjson backend "$3" '
+    "bg-deployment-\($scope_id)" as $action
+    | if ($backend.annotation // "") == "" then
+        {service: $backend.service, annotations: {}}
+      else
+        {service: ($backend.service + {name: $action}), annotations: {"alb.ingress.kubernetes.io/actions.\($action)": $backend.annotation}}
+      end
+    | {paths: [$paths[] as $path | {path: $path, pathType: "Prefix", backend: {service: .service}}], annotations}'
+}
+
+rebuild_ingress_build() {
+  jq -c --argjson rules "$2" '
+    ($rules | map(.paths[])) as $paths
+    | .metadata.annotations = (
+        (.metadata.annotations // {} | with_entries(select(.key | startswith("alb.ingress.kubernetes.io/actions.bg-deployment-") | not)))
+        + ($rules | map(.annotations) | add // {})
+      )
+    | .spec.rules[0].http.paths = (
+        if $paths == [] then [{path: "/", pathType: "Prefix", backend: {service: {name: "response-404", port: {name: "use-annotation"}}}}] else $paths end
+      )' <<<"$1"
+}
+
+rebuild_ingress_main() {
+  local links id slug status nrn paths scope_id scope_slug backend rule selected="" owners="" duplicates
+  local ingress_name live base snapshot verb=replace resource_version="" rules="" registry="" report="" ingress file rc=0
+  local scope_pattern='(^|:)scope=([0-9]+)(:|$)'
+  if ! rebuild_ingress_load; then
+    return 1
+  fi
+
+  echo "Listing the links of service $SERVICE_ID"
+  if ! links=$(rebuild_ingress_list_links); then
+    echo "The ingress was not changed; retry once the cause above is fixed."
+    return 1
+  fi
+  while IFS=$'\t' read -r -u 3 id slug status nrn paths; do
+    if [[ -z "$id" ]]; then
+      continue
+    fi
+    case "$status" in
+      deleting|deleted|cancelled)
+        echo "Skipping link $slug: it is $status"
+        continue
+        ;;
+    esac
+    if [[ ! "$nrn" =~ $scope_pattern ]]; then
+      echo "Error: link $slug has no scope in its NRN [$nrn]. The ingress was not changed."
+      return 1
+    fi
+    scope_id="${BASH_REMATCH[2]}"
+    if [[ "$status" != "active" ]]; then
+      echo "⚠ Link $slug is $status; its paths are kept"
+      report+="  - $slug: status $status, paths $paths kept"$'\n'
+    fi
+    if [[ "$paths" == "[]" ]]; then
+      echo "⚠ Link $slug declares no path; nothing to publish"
+      continue
+    fi
+    selected+="$slug"$'\t'"$scope_id"$'\t'"$paths"$'\n'
+    owners+=$(jq -r --arg slug "$slug" '.[] | "\(.)\t\($slug)"' <<<"$paths")$'\n'
+  done 3<<<"$links"
+
+  duplicates=$(printf '%s' "$owners" | rebuild_ingress_duplicate_paths)
+  if [[ -n "$duplicates" ]]; then
+    echo "Error: these paths are declared by more than one link; delete or update one of them. The ingress was not changed."
+    echo "$duplicates"
+    return 1
+  fi
+
+  ingress_name=$(last_good_ingress_name)
+  if ! live=$(kubectl get ingress "$ingress_name" -n "$K8S_NAMESPACE" -o json --ignore-not-found); then
+    echo "Error: could not read ingress [$ingress_name]. The ingress was not changed."
+    return 1
+  fi
+  if [[ -n "$live" ]]; then
+    echo "Rebuilding ingress [$ingress_name] from the live ingress"
+    base=$(last_good_clean_ingress <<<"$live")
+    resource_version=$(jq -r '.metadata.resourceVersion' <<<"$live")
+  else
+    snapshot=$(last_good_read) || rc=$?
+    if (( rc == 2 )); then
+      echo "Error: ingress [$ingress_name] does not exist and there is no last good snapshot $(last_good_name) to take its host and annotations from. The ingress was not changed."
+      return 1
+    fi
+    if (( rc != 0 )) || ! base=$(jq -ce '.data.ingress | fromjson | objects' <<<"$snapshot" 2>/dev/null); then
+      echo "Error: ingress [$ingress_name] does not exist and the snapshot $(last_good_name) could not be read. The ingress was not changed."
+      return 1
+    fi
+    echo "Ingress [$ingress_name] does not exist; rebuilding it from the host and annotations of the snapshot $(last_good_name)"
+    verb=create
+  fi
+
+  while IFS=$'\t' read -r -u 3 slug scope_id paths; do
+    if [[ -z "$slug" ]]; then
+      continue
+    fi
+    if ! scope_slug=$(rebuild_ingress_scope_slug "$scope_id") || ! backend=$(rebuild_ingress_scope_backend "$scope_id"); then
+      echo "The ingress was not changed; retry once the cause above is fixed."
+      return 1
+    fi
+    echo "Link $slug: scope $scope_slug ($scope_id), paths $paths"
+    rule=$(rebuild_ingress_link_rule "$scope_id" "$paths" "$backend")
+    rc=0
+    validate_references_for_ingress "$(rebuild_ingress_build "$base" "[$rule]")" "$paths" || rc=$?
+    if (( rc == 2 )); then
+      echo "⚠ Link $slug references services that do not exist or do not expose the port; its paths $paths return 404"
+      report+="  - $slug: invalid service references, paths $paths return 404"$'\n'
+      rule=$(rebuild_ingress_link_rule "$scope_id" "$paths" "$REBUILD_INGRESS_404_BACKEND")
+    elif (( rc != 0 )); then
+      echo "Link $slug could not be validated. The ingress was not changed; retry once the cause above is fixed."
+      return 1
+    fi
+    rules+="$rule"$'\n'
+    registry+=$(jq -c --arg scope "$scope_slug" '.[] | {path: ., scope: $scope}' <<<"$paths")$'\n'
+  done 3<<<"$selected"
+
+  ingress=$(rebuild_ingress_build "$base" "$(jq -sc . <<<"$rules")")
+  file="$OUTPUT_DIR/ingress-$SERVICE_ID-rebuilt.json"
+  if [[ "$verb" == "replace" ]]; then
+    jq --arg resource_version "$resource_version" '.metadata.resourceVersion = $resource_version' <<<"$ingress" > "$file"
+  else
+    printf '%s\n' "$ingress" > "$file"
+  fi
+  if ! lease_assert_held 20; then
+    return 1
+  fi
+  if ! kubectl "$verb" --save-config -f "$file"; then
+    echo "Error: could not $verb ingress [$ingress_name]. If it changed meanwhile, run rebuild-ingress again."
+    return 1
+  fi
+
+  if [[ -n "$report" ]]; then
+    echo "Links to review:"
+    printf '%s' "$report"
+  fi
+
+  VERIFY_PATHS=$(jq -c '[.spec.rules[0].http.paths[].path] | unique' <<<"$ingress")
+  REBUILT_RULES=$(jq -sc . <<<"$registry")
+  if ! MAX_WAIT_SECONDS=$(lease_budget "${MAX_WAIT_SECONDS:-120}"); then
+    return 1
+  fi
+  export VERIFY_PATHS
+  export REBUILT_RULES
+  export MAX_WAIT_SECONDS
+}
+
+set -euo pipefail
+
+if ! rebuild_ingress_main; then
+  exit 1
+fi

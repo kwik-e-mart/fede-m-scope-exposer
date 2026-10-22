@@ -1,0 +1,63 @@
+#!/bin/bash
+
+INGRESS_SERVICE_REFS_JQ='
+def action_refs($ingress; $name):
+  "alb.ingress.kubernetes.io/actions.\($name)" as $key
+  | ($ingress.metadata.annotations // {})[$key] as $raw
+  | if $raw == null then
+      error("ingress \($ingress.metadata.name): annotation \($key) does not exist")
+    else
+      (try ($raw | fromjson) catch error("ingress \($ingress.metadata.name): annotation \($key) is not valid JSON")) as $action
+      | if ($action | type) != "object" then
+          error("ingress \($ingress.metadata.name): annotation \($key) is not an action object")
+        elif $action.type == "forward" then
+          (($action.forwardConfig.targetGroups // []) + ($action.targetGroups // []))[]
+          | select(.serviceName != null)
+          | {service: .serviceName, port: (.servicePort // "-" | tostring)}
+        elif $action.type == "fixed-response" or $action.type == "redirect" then
+          empty
+        else
+          error("ingress \($ingress.metadata.name): annotation \($key) has unsupported action type \($action.type | tostring)")
+        end
+    end;
+
+def backend_refs($ingress; $backend):
+  if $backend.service == null then
+    empty
+  elif $backend.service.port.name == "use-annotation" then
+    action_refs($ingress; $backend.service.name)
+  else
+    {service: $backend.service.name, port: ($backend.service.port.number // $backend.service.port.name // "-" | tostring)}
+  end;
+
+(if has("items") then .items[] else . end) as $ingress
+| (
+    (if $paths == null and $ingress.spec.defaultBackend != null then {path: "(default)", backend: $ingress.spec.defaultBackend} else empty end),
+    ($ingress.spec.rules // [])[].http.paths[]?
+    | select($paths == null or (.path as $path | $paths | index([$path]) != null))
+    | {path: .path, backend: .backend}
+  )
+| . as $entry
+| backend_refs($ingress; $entry.backend)
+| [$ingress.metadata.name, $entry.path, .service, .port]
+| @tsv
+'
+
+ingress_service_refs() {
+  local paths="${1:-null}" errors rc=0
+  if ! jq -e 'type == "array" or type == "null"' <<<"$paths" >/dev/null 2>&1; then
+    echo "invalid paths filter $paths: expected a JSON array of paths" >&2
+    return 1
+  fi
+  { errors=$(jq -r --argjson paths "$paths" "$INGRESS_SERVICE_REFS_JQ" 2>&1 >&3 3>&-) || rc=$?; } 3>&1
+  if (( rc == 0 )); then
+    return 0
+  fi
+  errors="${errors%%$'\n'*}"
+  case "$errors" in
+    "jq: error (at "*"): ingress "*) echo "${errors#jq: error (at *): }" >&2 ;;
+    "jq: parse error"*) echo "the ingress to read references from is not valid JSON" >&2 ;;
+    *) echo "the ingress to read references from is not an Ingress or an Ingress list" >&2 ;;
+  esac
+  return 1
+}

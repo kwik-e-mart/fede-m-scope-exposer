@@ -17,9 +17,16 @@ steps:
     file: "$OVERRIDES_PATH/deployment/build_datadog_environment"
   - name: setup_cloudwatch_logs
     type: script
-    after: build_datadog_environment_blue_deployment
+    after: build_datadog_environment
     file: "$OVERRIDES_PATH/deployment/setup_cloudwatch_logs"
+  - name: setup_node_affinity
+    type: script
+    after: setup_cloudwatch_logs
+    file: "$OVERRIDES_PATH/deployment/node-affinity/build_node_affinity.sh"
   - name: sync_exposer
     type: script
     file: "$OVERRIDES_PATH/deployment/sync_exposer"
-    after: apply
+    after: apply traffic
+    output:
+      - name: CONTEXT
+        type: environment

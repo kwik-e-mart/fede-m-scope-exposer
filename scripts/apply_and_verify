@@ -1,0 +1,76 @@
+#!/bin/bash
+
+APPLY_AND_VERIFY_DIR="$(dirname "${BASH_SOURCE[0]}")"
+APPLY_AND_VERIFY_REAPPLY_SECONDS=40
+
+apply_and_verify_load() {
+  if ! RESTORE_INGRESS_LIB_ONLY=true source "$APPLY_AND_VERIFY_DIR/restore_ingress" || ! restore_ingress_load; then
+    echo "Error: could not load restore_ingress from $APPLY_AND_VERIFY_DIR"
+    return 1
+  fi
+}
+
+apply_and_verify_reconciliation() {
+  local budget
+  if ! budget=$(lease_budget "${MAX_WAIT_SECONDS:-120}"); then
+    return 1
+  fi
+  ( MAX_WAIT_SECONDS="$budget"; source "$APPLY_AND_VERIFY_DIR/verify_ingress_reconciliation" )
+}
+
+apply_and_verify_restore() {
+  local remaining ingress rc=0
+  if ! remaining=$(lease_remaining); then
+    echo "The last good snapshot was not re-applied. Run restore-ingress to return the ingress to it."
+    return 1
+  fi
+  if (( remaining < APPLY_AND_VERIFY_REAPPLY_SECONDS )); then
+    echo "Error: the Lease $(lease_name) has ${remaining}s left, less than the ${APPLY_AND_VERIFY_REAPPLY_SECONDS}s a re-apply needs. The last good snapshot was not re-applied; run restore-ingress to return the ingress to it."
+    return 1
+  fi
+  echo "Re-applying the last good snapshot $(last_good_name)"
+  ingress=$(restore_ingress_snapshot) || rc=$?
+  if (( rc == 2 )); then
+    echo "The last good snapshot was not re-applied; the ingress keeps the change that failed."
+    return 1
+  fi
+  if (( rc != 0 )); then
+    echo "The last good snapshot was not re-applied; the ingress keeps the change that failed. Run restore-ingress once the cause above is fixed."
+    return 1
+  fi
+  if ! restore_ingress_replace "$ingress"; then
+    echo "The last good snapshot was not re-applied; the ingress keeps the change that failed."
+    return 1
+  fi
+  if ! RECONCILIATION_EXPECTATION=present apply_and_verify_reconciliation; then
+    echo "Error: the last good snapshot was re-applied but its verification failed. Run restore-ingress, or rebuild-ingress if it fails again."
+    return 1
+  fi
+}
+
+apply_and_verify_main() {
+  if ! apply_and_verify_load; then
+    return 1
+  fi
+  if [[ ! -f "${INGRESS_FILE-}" ]]; then
+    echo "Error: rendered ingress ${INGRESS_FILE-} does not exist"
+    return 1
+  fi
+  if ! lease_assert_held 20; then
+    return 1
+  fi
+  if kubectl apply -f "$INGRESS_FILE" && apply_and_verify_reconciliation; then
+    return 0
+  fi
+  echo "The change to the ingress failed"
+  if apply_and_verify_restore; then
+    echo "Error: the change failed; the last good snapshot was re-applied and verified, so the ingress is back to its last good state."
+  fi
+  return 1
+}
+
+set -euo pipefail
+
+if ! apply_and_verify_main; then
+  exit 1
+fi

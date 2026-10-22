@@ -2,34 +2,42 @@
 
 EXPOSER_POLL_SECONDS=5
 
+link_state() {
+  if [[ "$1" == gone ]]; then
+    echo "ya no existe"
+  else
+    echo "en estado $1"
+  fi
+}
+
+exposer_retry_hint() {
+  case "$1" in
+    deleting) echo "Cuando el link termine de borrarse, reintentá el paso o hacé rollback." ;;
+    archiving) echo "Cuando el link termine de archivarse, reintentá el paso o hacé rollback." ;;
+    gone|"") echo "Reintentá el paso o hacé rollback." ;;
+    *) echo "Cuando el link vuelva a active, reintentá el paso o hacé rollback." ;;
+  esac
+}
+
+exposer_sync_failed() {
+  echo "❌ No se pudo sincronizar el exposer ($1). Las dos versiones siguen activas. $(exposer_retry_hint "$2")"
+}
+
 list_exposer_links() {
-  local nrn="$1" limit=200 max_pages=50 offset=0 pages=0 total page page_count links='[]'
-  while true; do
-    if (( pages >= max_pages )); then
-      echo "❌ Link list of $nrn exceeded $max_pages pages of $limit" >&2
-      return 1
-    fi
-    if ! page=$(np link list --nrn "$nrn" --limit "$limit" --offset "$offset" --format json); then
-      echo "❌ Could not list links of $nrn: $page" >&2
-      return 1
-    fi
-    if ! jq -e '.results | type == "array"' <<<"$page" >/dev/null 2>&1; then
-      echo "❌ Invalid link list response for $nrn (offset $offset): $page" >&2
-      return 1
-    fi
-    pages=$((pages + 1))
-    links=$(jq -c --argjson page "$page" '. + $page.results' <<<"$links")
-    page_count=$(jq '.results | length' <<<"$page")
-    total=$(jq -r '.paging.total | if type == "number" then . else empty end' <<<"$page")
-    if (( page_count < limit )); then
-      break
-    fi
-    if [[ -n "$total" ]] && (( offset + limit >= total )); then
-      break
-    fi
-    offset=$((offset + limit))
-  done
-  jq -c --arg spec "$LINK_SPECIFICATION_ID" 'map(select(.specification_id == $spec))' <<<"$links"
+  local nrn="$1" limit=200 response
+  if ! response=$(np link list --nrn "$nrn" --limit "$limit" --format json); then
+    echo "No se pudieron listar los links de $nrn: $response" >&2
+    return 1
+  fi
+  if ! jq -e '.results | type == "array"' <<<"$response" >/dev/null 2>&1; then
+    echo "Respuesta inválida al listar los links de $nrn: $response" >&2
+    return 1
+  fi
+  if (( $(jq '.results | length' <<<"$response") >= limit )); then
+    echo "La lista de links de $nrn trajo $limit links, el máximo de una lectura; no se puede confirmar que esté completa" >&2
+    return 1
+  fi
+  jq -c --arg spec "$LINK_SPECIFICATION_ID" '.results | map(select(.specification_id == $spec))' <<<"$response"
 }
 
 read_link_status() {
@@ -39,7 +47,7 @@ read_link_status() {
       echo "gone"
       return 0
     fi
-    echo "❌ Could not read link $link_id: $response" >&2
+    echo "No se pudo leer el link $link_id: $response" >&2
     return 1
   fi
   jq -r '.status // empty' <<<"$response"
@@ -48,18 +56,22 @@ read_link_status() {
 wait_link_active() {
   local link_id="$1" waited=0 status
   while true; do
-    status=$(read_link_status "$link_id") || return 1
-    echo "Link $link_id is $status after ${waited}s"
+    if ! status=$(read_link_status "$link_id"); then
+      FAILURE_REASON="no se pudo leer el link"
+      return 1
+    fi
+    LINK_STATE="$status"
+    echo "Link $link_id $(link_state "$status") a los ${waited}s"
     case "$status" in
       active) return 0 ;;
       pending|pending_create|creating|updating) ;;
       *)
-        echo "❌ Link $link_id of the exposer is $status while waiting for it to be active"
+        FAILURE_REASON="se esperaba que pasara a active"
         return 1
         ;;
     esac
     if (( waited >= EXPOSER_LINK_WAIT_SECONDS )); then
-      echo "❌ Link $link_id of the exposer is still $status after ${waited}s (EXPOSER_LINK_WAIT_SECONDS=$EXPOSER_LINK_WAIT_SECONDS)"
+      FAILURE_REASON="tope de ${EXPOSER_LINK_WAIT_SECONDS}s (EXPOSER_LINK_WAIT_SECONDS) vencido"
       return 1
     fi
     sleep "$EXPOSER_POLL_SECONDS"
@@ -70,21 +82,25 @@ wait_link_active() {
 wait_link_gone() {
   local link_id="$1" waited=0 status
   while true; do
-    status=$(read_link_status "$link_id") || return 1
-    echo "Link $link_id is $status after ${waited}s"
+    if ! status=$(read_link_status "$link_id"); then
+      FAILURE_REASON="no se pudo leer el link"
+      return 1
+    fi
+    LINK_STATE="$status"
+    echo "Link $link_id $(link_state "$status") a los ${waited}s"
     case "$status" in
       gone|deleted|archived)
-        echo "Link $link_id was removed, nothing to synchronize"
+        echo "Link $link_id eliminado, no hay nada que sincronizar"
         return 0
         ;;
       deleting|archiving) ;;
       *)
-        echo "❌ Link $link_id of the exposer is $status while waiting for it to be removed"
+        FAILURE_REASON="se esperaba que se eliminara"
         return 1
         ;;
     esac
     if (( waited >= EXPOSER_LINK_WAIT_SECONDS )); then
-      echo "❌ Link $link_id of the exposer is still $status after ${waited}s (EXPOSER_LINK_WAIT_SECONDS=$EXPOSER_LINK_WAIT_SECONDS)"
+      FAILURE_REASON="tope de ${EXPOSER_LINK_WAIT_SECONDS}s (EXPOSER_LINK_WAIT_SECONDS) vencido"
       return 1
     fi
     sleep "$EXPOSER_POLL_SECONDS"
@@ -98,12 +114,13 @@ resolve_refresh_action_id() {
     return 0
   fi
   if ! actions=$(np link specification action specification list --linkSpecificationId "$LINK_SPECIFICATION_ID" --format json); then
-    echo "❌ Could not list the action specifications of $LINK_SPECIFICATION_ID: $actions"
+    echo "No se pudieron leer las actions de la link specification $LINK_SPECIFICATION_ID: $actions"
+    FAILURE_REASON="no se pudieron leer las actions de la link specification"
     return 1
   fi
   REFRESH_ACTION_ID=$(jq -r '[.results[]? | select(.slug == "refresh")][0].id // empty' <<<"$actions")
   if [[ -z "$REFRESH_ACTION_ID" ]]; then
-    echo "❌ Link specification $LINK_SPECIFICATION_ID has no refresh action"
+    FAILURE_REASON="la link specification $LINK_SPECIFICATION_ID no tiene la action refresh"
     return 1
   fi
 }
@@ -112,28 +129,29 @@ wait_action() {
   local link_id="$1" action_id="$2" waited=0 response status
   while true; do
     if ! response=$(np link action read --linkId "$link_id" --id "$action_id" --format json); then
-      echo "❌ Could not read action $action_id of link $link_id: $response"
+      echo "No se pudo leer el refresh $action_id del link $link_id: $response"
+      FAILURE_REASON="no se pudo leer el refresh $action_id"
       return 1
     fi
     status=$(jq -r '.status // empty' <<<"$response")
-    echo "Refresh action $action_id of link $link_id is $status after ${waited}s"
+    echo "Refresh $action_id del link $link_id en estado $status a los ${waited}s"
     case "$status" in
       success)
-        echo "✅ Public ingress synchronized for link $link_id"
+        echo "✅ Ingress público sincronizado para el link $link_id"
         return 0
         ;;
       pending|pending_create|in_progress) ;;
       failed|cancelled)
-        echo "❌ Refresh action $action_id of link $link_id ended $status"
+        FAILURE_REASON="refresh $action_id $status"
         return 1
         ;;
       *)
-        echo "❌ Refresh action $action_id of link $link_id has an unexpected status: $response"
+        FAILURE_REASON="refresh $action_id en estado inesperado '$status'"
         return 1
         ;;
     esac
     if (( waited >= EXPOSER_ACTION_WAIT_SECONDS )); then
-      echo "❌ Refresh action $action_id of link $link_id is still $status after ${waited}s (EXPOSER_ACTION_WAIT_SECONDS=$EXPOSER_ACTION_WAIT_SECONDS)"
+      FAILURE_REASON="refresh $action_id sigue $status tras el tope de ${EXPOSER_ACTION_WAIT_SECONDS}s (EXPOSER_ACTION_WAIT_SECONDS)"
       return 1
     fi
     sleep "$EXPOSER_POLL_SECONDS"
@@ -149,36 +167,35 @@ run_refresh() {
     if response=$(np link action create --linkId "$link_id" --body "$body" --format json); then
       action_id=$(jq -r '.id // empty' <<<"$response")
       if [[ -z "$action_id" ]]; then
-        echo "❌ Refresh action of link $link_id was created without an id: $response"
+        echo "Respuesta al crear el refresh del link $link_id: $response"
+        FAILURE_REASON="el refresh se creó sin id"
         return 1
       fi
-      echo "Created refresh action $action_id for link $link_id"
+      echo "Refresh $action_id creado para el link $link_id"
       wait_action "$link_id" "$action_id"
       return
     fi
     if [[ "$response" != *"Only active links"* ]]; then
-      echo "❌ Could not create the refresh action of link $link_id: $response"
+      echo "No se pudo crear el refresh del link $link_id: $response"
+      FAILURE_REASON="no se pudo crear el refresh"
       return 1
     fi
-    echo "Link $link_id stopped being active before the refresh (attempt $attempt), waiting again"
+    echo "El link $link_id dejó de estar active antes del refresh (intento $attempt); se espera de nuevo"
     wait_link_active "$link_id" || return 1
   done
-  echo "❌ Link $link_id kept rejecting the refresh after $attempt attempts"
+  FAILURE_REASON="el link rechazó el refresh $attempt veces"
   return 1
 }
 
 sync_exposer_link() {
   local link_id="$1" status="$2"
-  echo "Link $link_id of the exposer is $status"
+  echo "Link $link_id del exposer en estado $status"
   case "$status" in
     active) run_refresh "$link_id" ;;
     pending|pending_create|creating|updating) wait_link_active "$link_id" && run_refresh "$link_id" ;;
     deleting|archiving) wait_link_gone "$link_id" ;;
-    deleted|archived) echo "Link $link_id ignored" ;;
-    *)
-      echo "❌ Link $link_id of the exposer is $status"
-      return 1
-      ;;
+    deleted|archived) echo "Link $link_id ignorado" ;;
+    *) return 1 ;;
   esac
 }
 
@@ -186,7 +203,7 @@ EXPOSER_LINK_WAIT_SECONDS=${EXPOSER_LINK_WAIT_SECONDS-360}
 EXPOSER_ACTION_WAIT_SECONDS=${EXPOSER_ACTION_WAIT_SECONDS-420}
 for wait_var in EXPOSER_LINK_WAIT_SECONDS EXPOSER_ACTION_WAIT_SECONDS; do
   if [[ ! "${!wait_var}" =~ ^[0-9]+$ ]]; then
-    echo "❌ $wait_var must be a whole number of seconds, got '${!wait_var}'"
+    echo "❌ $wait_var debe ser un número entero de segundos, se recibió '${!wait_var}'"
     exit 1
   fi
 done
@@ -196,16 +213,24 @@ REFRESH_ACTION_ID=""
 
 echo "LINK SPECIFICATION ID: $LINK_SPECIFICATION_ID, SCOPE_NRN: $SCOPE_NRN"
 
-EXPOSER_LINKS=$(list_exposer_links "$SCOPE_NRN") || exit 1
+if ! EXPOSER_LINKS=$(list_exposer_links "$SCOPE_NRN"); then
+  exposer_sync_failed "no se pudieron leer los links del scope"
+  exit 1
+fi
 
 if [[ "$(jq 'length' <<<"$EXPOSER_LINKS")" -eq 0 ]]; then
-  echo "This scope is not public, skipping public ingress synchronization"
+  echo "El scope no es público, no hay ingress público que sincronizar"
   return 0
 fi
 
-echo "This is a public scope, starting public ingress synchronization"
+echo "El scope es público, sincronizando el ingress público"
 
 for link_id in $(jq -r '.[].id' <<<"$EXPOSER_LINKS"); do
   link_status=$(jq -r --arg id "$link_id" '.[] | select((.id | tostring) == $id) | .status' <<<"$EXPOSER_LINKS")
-  sync_exposer_link "$link_id" "$link_status" || exit 1
+  LINK_STATE="$link_status"
+  FAILURE_REASON=""
+  if ! sync_exposer_link "$link_id" "$link_status"; then
+    exposer_sync_failed "link $link_id $(link_state "$LINK_STATE")${FAILURE_REASON:+; $FAILURE_REASON}" "$LINK_STATE"
+    exit 1
+  fi
 done

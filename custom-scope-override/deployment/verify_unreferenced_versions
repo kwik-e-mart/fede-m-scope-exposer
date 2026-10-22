@@ -1,0 +1,181 @@
+#!/bin/bash
+
+unreferenced_versions_failed() {
+  if [[ "$EXPOSER_REFERENCE_GUARD" == warn ]]; then
+    echo "⚠️ No se pudieron verificar las referencias ($1). Modo warn: se continúa con el borrado."
+    return 0
+  fi
+  echo "❌ No se verificó que las versiones a borrar no estén referenciadas ($1). No se borró ninguna versión; corregí el problema y reintentá."
+  return 1
+}
+
+validate_reference_guard() {
+  EXPOSER_REFERENCE_GUARD=${EXPOSER_REFERENCE_GUARD-warn}
+  case "$EXPOSER_REFERENCE_GUARD" in
+    enforce|warn) ;;
+    *)
+      echo "❌ EXPOSER_REFERENCE_GUARD debe ser enforce o warn, se recibió '$EXPOSER_REFERENCE_GUARD'"
+      return 1
+      ;;
+  esac
+}
+
+validate_unreferenced_versions_config() {
+  case "${VERSION_TO_KEEP-}" in
+    new|active) ;;
+    *)
+      echo "VERSION_TO_KEEP debe ser new o active, se recibió '${VERSION_TO_KEEP-}'"
+      return 1
+      ;;
+  esac
+  case "${REFERENCE_FIX_HINT-}" in
+    refresh|unlink) ;;
+    *)
+      echo "REFERENCE_FIX_HINT debe ser refresh o unlink, se recibió '${REFERENCE_FIX_HINT-}'"
+      return 1
+      ;;
+  esac
+  local required
+  for required in SCOPE_ID K8S_NAMESPACE DEPLOYMENT_ID; do
+    if [[ -z "${!required-}" ]]; then
+      echo "$required está vacía"
+      return 1
+    fi
+  done
+}
+
+load_ingress_service_refs() {
+  if [[ -z "${INGRESS_SERVICE_REFS_PATH-}" || ! -f "$INGRESS_SERVICE_REFS_PATH" ]]; then
+    echo "No se encontró el extractor de referencias en '${INGRESS_SERVICE_REFS_PATH-}' (INGRESS_SERVICE_REFS_PATH)"
+    return 1
+  fi
+  if ! source "$INGRESS_SERVICE_REFS_PATH" || ! declare -F ingress_service_refs >/dev/null; then
+    echo "No se pudo cargar ingress_service_refs desde $INGRESS_SERVICE_REFS_PATH"
+    return 1
+  fi
+}
+
+services_to_delete() {
+  local current_active clean keep services
+  if ! current_active=$(jq -r '.scope.current_active_deployment // empty' <<<"$CONTEXT"); then
+    echo "No se pudo leer scope.current_active_deployment del CONTEXT" >&2
+    return 1
+  fi
+  if [[ "$VERSION_TO_KEEP" == new ]]; then
+    clean="$current_active"
+    keep="$DEPLOYMENT_ID"
+  else
+    clean="$DEPLOYMENT_ID"
+    keep="$current_active"
+  fi
+  echo "Versiones: se limpia '$clean', se conserva '$keep' (VERSION_TO_KEEP=$VERSION_TO_KEEP)" >&2
+  if ! services=$(kubectl get service -n "$K8S_NAMESPACE" -l "scope_id=$SCOPE_ID" -o json); then
+    echo "No se pudieron listar los services del scope $SCOPE_ID en $K8S_NAMESPACE" >&2
+    return 1
+  fi
+  if ! jq -e '.items | type == "array"' <<<"$services" >/dev/null 2>&1; then
+    echo "Lista de services inválida para el scope $SCOPE_ID: $services" >&2
+    return 1
+  fi
+  jq -r --arg clean "$clean" --arg keep "$keep" '
+    .items[]
+    | (.metadata.labels.deployment_id // "") as $deployment
+    | select($deployment != "" and ($deployment == $clean or $deployment != $keep))
+    | [.metadata.name, $deployment] | @tsv' <<<"$services"
+}
+
+external_ingresses() {
+  local ingresses
+  if ! ingresses=$(kubectl get ingress -n "$K8S_NAMESPACE" -o json); then
+    echo "No se pudieron listar los ingress de $K8S_NAMESPACE" >&2
+    return 1
+  fi
+  if ! jq -ce --arg scope "$SCOPE_ID" '.items |= map(select(.metadata.labels.scope_id != $scope))' <<<"$ingresses" 2>/dev/null; then
+    echo "Lista de ingress inválida para $K8S_NAMESPACE: $ingresses" >&2
+    return 1
+  fi
+}
+
+version_of_service() {
+  local wanted="$1" name deployment
+  while IFS=$'\t' read -r name deployment; do
+    if [[ "$name" == "$wanted" ]]; then
+      echo "$deployment"
+      return 0
+    fi
+  done <<<"$TO_DELETE"
+  return 2
+}
+
+reference_fix() {
+  local ingress="$1" exposer_service
+  exposer_service=$(jq -r --arg name "$ingress" '.items[] | select(.metadata.name == $name) | .metadata.labels.service_id // empty' <<<"$EXTERNAL_INGRESSES")
+  if [[ -z "$exposer_service" ]]; then
+    echo "corregí ese ingress para que no apunte a la versión"
+  elif [[ "$REFERENCE_FIX_HINT" == unlink ]]; then
+    echo "desvinculá el scope del exposer $exposer_service (unlink)"
+  else
+    echo "ejecutá refresh del link del exposer $exposer_service"
+  fi
+}
+
+verify_unreferenced_versions() {
+  local refs name deployment ingress path service port found=0 prefix="❌" rc
+  validate_reference_guard || return 1
+  if ! validate_unreferenced_versions_config; then
+    unreferenced_versions_failed "configuración inválida del step"
+    return
+  fi
+  if ! load_ingress_service_refs; then
+    unreferenced_versions_failed "no se pudo cargar el extractor de referencias"
+    return
+  fi
+  if ! TO_DELETE=$(services_to_delete); then
+    unreferenced_versions_failed "no se pudieron leer los services del scope"
+    return
+  fi
+  if [[ -z "$TO_DELETE" ]]; then
+    echo "No se borra ningún service del scope $SCOPE_ID"
+    return 0
+  fi
+  while IFS=$'\t' read -r name deployment; do
+    echo "Se va a borrar el service $name (versión $deployment)"
+  done <<<"$TO_DELETE"
+  if ! EXTERNAL_INGRESSES=$(external_ingresses); then
+    unreferenced_versions_failed "no se pudieron leer los ingress del namespace"
+    return
+  fi
+  if ! refs=$(ingress_service_refs <<<"$EXTERNAL_INGRESSES"); then
+    unreferenced_versions_failed "no se pudieron leer las referencias de los ingress del namespace"
+    return
+  fi
+  if [[ "$EXPOSER_REFERENCE_GUARD" == warn ]]; then
+    prefix="⚠️"
+  fi
+  while IFS=$'\t' read -r ingress path service port; do
+    if [[ -z "$ingress" ]]; then
+      continue
+    fi
+    rc=0
+    deployment=$(version_of_service "$service") || rc=$?
+    if (( rc == 2 )); then
+      continue
+    fi
+    echo "$prefix $ingress → $service (path $path, port $port, versión $deployment): $(reference_fix "$ingress")"
+    found=$((found + 1))
+  done <<<"$refs"
+  if (( found == 0 )); then
+    echo "✅ Ningún ingress fuera del scope $SCOPE_ID referencia las versiones a borrar"
+    return 0
+  fi
+  if [[ "$EXPOSER_REFERENCE_GUARD" == warn ]]; then
+    echo "⚠️ $found referencia(s) a versiones que este workflow va a borrar. Modo warn: se continúa con el borrado."
+    return 0
+  fi
+  echo "❌ $found referencia(s) a versiones que este workflow va a borrar. No se borró ninguna versión; aplicá la corrección indicada y reintentá."
+  return 1
+}
+
+if ! verify_unreferenced_versions; then
+  exit 1
+fi

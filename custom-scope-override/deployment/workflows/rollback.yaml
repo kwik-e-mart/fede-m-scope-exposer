@@ -11,11 +11,21 @@ steps:
     type: script
     after: update blue deployment
     file: "$OVERRIDES_PATH/deployment/build_datadog_environment"
-  - name: setup_cloudwatch_logs
+  - name: setup_node_affinity
     type: script
-    after: build_datadog_environment
-    file: "$OVERRIDES_PATH/deployment/setup_cloudwatch_logs"
+    after: setup_cloudwatch_logs
+    file: "$OVERRIDES_PATH/deployment/node-affinity/build_node_affinity.sh"
   - name: sync_exposer
     type: script
     file: "$OVERRIDES_PATH/deployment/sync_exposer"
-    after: apply
+    before: delete deployment
+    output:
+      - name: CONTEXT
+        type: environment
+  - name: verify_unreferenced_versions
+    type: script
+    file: "$OVERRIDES_PATH/deployment/verify_unreferenced_versions"
+    before: delete deployment
+    configuration:
+      VERSION_TO_KEEP: active
+      REFERENCE_FIX_HINT: refresh

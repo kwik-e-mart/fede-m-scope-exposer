@@ -1,9 +1,23 @@
 #!/bin/bash
 
+# setup_logs_provider resolves the destination and leaves it in the context.
+if [ "$(echo "$CONTEXT" | jq -r '.logs_provider_resolved // empty')" = "cloudwatch" ]; then
+    echo "Logs provider is cloudwatch, skipping datadog annotations"
+    return 0
+fi
+
 ENVIRONMENT=$(echo "$CONTEXT" | jq -r .scope.dimensions.environment)
 SERVICE=$(basename "$(echo "$CONTEXT" | jq -r '.application.repository_url')-kubernetes" | cut -c1-63)
+SERVICE=${SERVICE%-}
 VERSION=$(echo "$CONTEXT" | jq -r .release.semver)
-TEAM=$(echo "$CONTEXT" | jq -r .application.metadata.scaffolding.project_details.tribe_name)
+DRP_CLUSTER_NAME=spin-cluster-dr
+# sync-squad-metadata writes the catalog-info owner to tags.squad_name; read owner first for the rename.
+# "None" matches the owner tag on AWS resources (genesys-platform), so Cloudability groups both alike.
+OWNER=$(echo "$CONTEXT" | jq -r '.application.tags.owner // .application.tags.squad_name // "None"')
+if [[ ! "$OWNER" =~ ^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$ ]]; then
+  echo "Owner '$OWNER' is not a valid label value, using None"
+  OWNER=None
+fi
 
 ARCHITECTURE=$(echo "$CONTEXT" | jq -r .application.metadata.scaffolding.architecture_type)
 
@@ -13,14 +27,22 @@ ARCHITECTURE=$(echo "$CONTEXT" | jq -r .application.metadata.scaffolding.archite
 #admission.datadoghq.com/ruby-lib.version: "v2.17.0"
 #admission.datadoghq.com/dotnet-lib.version: "v3.19.0"
 
+if [[ "$ENVIRONMENT" == 'prd' ]]; then ENVIRONMENT=prod; fi
+
+DD_ENV="$ENVIRONMENT"
+
+if [[ "$CLUSTER_NAME" == "$DRP_CLUSTER_NAME" ]]; then
+  DD_ENV=dr
+fi
+
 case "$ARCHITECTURE" in
   "react-"* | "js-"*)
-    TECHNOLOGY=nodejs
+    TECHNOLOGY=js
     DATADOG_LIB_VERSION=v5.56.0
     ;;
   "spring-boot-"* | "java-"*)
       TECHNOLOGY=java
-      DATADOG_LIB_VERSION=v1.5.0
+      DATADOG_LIB_VERSION=v1.50.0
       ;;
   "python-"*)
       TECHNOLOGY=python
@@ -41,22 +63,28 @@ case "$ARCHITECTURE" in
     ;;
 esac
 
-DATADOG_LABELS=$(jq -n --arg env "$ENVIRONMENT" --arg service "$SERVICE" --arg version "$VERSION" '{
+DATADOG_LABELS=$(jq -n --arg env "$DD_ENV" --arg service "$SERVICE" --arg version "$VERSION" --arg owner "$OWNER" '{
+  "owner": $owner,
   "tags.datadoghq.com/env": $env,
   "tags.datadoghq.com/service": $service,
   "tags.datadoghq.com/version": $version,
-  "admission.datadoghq.com/enabled": "true"
+  "admission.datadoghq.com/enabled": "true",
+  "admission.datadoghq.com/config.mode": "socket"
 }')
 
-DATADOG_ANNOTATIONS=$(jq -n --arg team "$TEAM" --arg java_lib_version "$JAVA_LIB_VERSION" '{
-  "admission.datadoghq.com/config.mode": "socket",
-  "ad.datadoghq.com/tags": ("{\"team\": \"" + $team + "\"}")
+DATADOG_ANNOTATIONS=$(jq -n --arg owner "$OWNER" '{
+  "ad.datadoghq.com/tags": ({team: $owner, squad: $owner} | tojson)
 }')
 
 if [[ -n "$TECHNOLOGY" ]]; then
   DATADOG_ANNOTATIONS=$(echo "$DATADOG_ANNOTATIONS" | jq --arg technology "$TECHNOLOGY" --arg lib_version "$DATADOG_LIB_VERSION" '
     . + { ("admission.datadoghq.com/" + $technology + "-lib.version"): $lib_version }
   ')
+  if [[ "$SERVICE" == "tr-spin-transaction-svc-backend-java-gradle-kubernetes" ]]; then
+    DATADOG_ANNOTATIONS=$(echo "$DATADOG_ANNOTATIONS" | jq --arg technology "$TECHNOLOGY" --arg lib_version "$DATADOG_LIB_VERSION" '
+      . + { "ad.datadoghq.com/tr-spin-transaction-svc-backend-java-gradle-kubernetes.logs": "[{\"source\": \"tr-spin-transaction-svc-backend-java-gradle-kubernetes\", \"service\": \"tr-spin-transaction-svc-backend-java-gradle-kubernetes\", \"log_processing_rules\": [{\"type\": \"include_at_match\", \"name\": \"checks\", \"pattern\": \"TIMED OUT-SYSTEM|service temporary unavailable\"}]}]"}
+    ')
+  fi
 fi
 
 MODIFIERS=$(echo "$CONTEXT" | jq .k8s_modifiers)

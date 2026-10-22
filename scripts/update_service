@@ -24,6 +24,15 @@ elif [[ "$ACTION" == "remove" ]]; then
       entity_nrn: (.entity_nrn | sub(":scope=[^:]+$"; ""))
     }
   ')
+elif [[ "$ACTION" == "rebuild" ]]; then
+  echo "Realigning the service rules with the published paths: $REBUILT_RULES"
+  UPDATED_ATTRIBUTES=$(echo "$CONTEXT" | jq --argjson rules "$REBUILT_RULES" '
+    .service.attributes.rules = $rules |
+    {
+      attributes: .service.attributes,
+      entity_nrn: (.entity_nrn | sub(":scope=[^:]+$"; ""))
+    }
+  ')
 else
   echo "Error: unknown ACTION '$ACTION'"
   exit 1

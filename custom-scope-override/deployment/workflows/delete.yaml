@@ -2,4 +2,11 @@ steps:
   - name: sync_exposer
     type: script
     file: "$OVERRIDES_PATH/deployment/sync_exposer"
-    after: apply traffic
+    before: delete deployment
+  - name: verify_unreferenced_versions
+    type: script
+    file: "$OVERRIDES_PATH/deployment/verify_unreferenced_versions"
+    before: delete deployment
+    configuration:
+      VERSION_TO_KEEP: active
+      REFERENCE_FIX_HINT: unlink
