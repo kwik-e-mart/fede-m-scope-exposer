@@ -41,7 +41,7 @@ rebuild_ingress_list_links() {
 
 rebuild_ingress_duplicate_paths() {
   awk -F'\t' '
-    { links[$1] = ($1 in links) ? links[$1] ", " $2 : $2; count[$1]++ }
+    { if ($1 in links) links[$1] = links[$1] ", " $2; else links[$1] = $2; count[$1]++ }
     END { for (path in count) if (count[path] > 1) print "  " path ": " links[path] }' | LC_ALL=C sort
 }
 
