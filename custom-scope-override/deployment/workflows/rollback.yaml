@@ -14,7 +14,7 @@ steps:
   - name: setup_node_affinity
     type: script
     after: setup_cloudwatch_logs
-    file: "$OVERRIDES_PATH/deployment/node-affinity/build_node_affinity.sh"
+    file: "$OVERRIDES_PATH/deployment/node-affinity/build_node_affinity"
   - name: sync_exposer
     type: script
     file: "$OVERRIDES_PATH/deployment/sync_exposer"
