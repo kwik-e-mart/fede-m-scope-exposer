@@ -3,14 +3,15 @@
 REBUILD_INGRESS_PAGE_SIZE=200
 REBUILD_INGRESS_404_BACKEND='{"service":{"name":"response-404","port":{"name":"use-annotation"}},"annotation":null}'
 
-rebuild_ingress_load() {
-  local dir
-  dir="$(dirname "${BASH_SOURCE[0]}")"
-  if ! LAST_GOOD_LIB_ONLY=true source "$dir/last_good" || ! VALIDATE_REFERENCES_LIB_ONLY=true source "$dir/validate_references"; then
-    echo "Error: could not load last_good and validate_references from $dir"
-    return 1
-  fi
-}
+if ! source "$(dirname "${BASH_SOURCE[0]}")/lease_lib"; then
+  echo "Error: could not load lease_lib from $(dirname "${BASH_SOURCE[0]}")"
+  exit 1
+fi
+
+if ! source "$(dirname "${BASH_SOURCE[0]}")/validate_references_lib"; then
+  echo "Error: could not load validate_references_lib from $(dirname "${BASH_SOURCE[0]}")"
+  exit 1
+fi
 
 rebuild_ingress_list_links() {
   local offset=0 page count account_nrn
@@ -85,25 +86,29 @@ rebuild_ingress_link_rule() {
     | {paths: [$paths[] as $path | {path: $path, pathType: "Prefix", backend: {service: .service}}], annotations}'
 }
 
+rebuild_ingress_render() {
+  local context_path="$OUTPUT_DIR/context-$SERVICE_ID.json" rendered rc=0
+  jq --arg k8s_namespace "$K8S_NAMESPACE" --arg alb_name "$ALB_NAME" --arg visibility "$VISIBILITY" --arg domain "$SERVICE_DOMAIN" \
+    '. + {k8s_namespace: $k8s_namespace, alb_name: $alb_name, visibility: $visibility} | .parameters.domain = $domain' <<<"$CONTEXT" > "$context_path"
+  rendered=$(gomplate -c .="$context_path" --file "$TEMPLATE") || rc=$?
+  rm -f "$context_path"
+  if (( rc != 0 )); then
+    return 1
+  fi
+  yq -o=json -I=0 '.' <<<"$rendered"
+}
+
 rebuild_ingress_build() {
   jq -c --argjson rules "$2" '
     ($rules | map(.paths[])) as $paths
-    | .metadata.annotations = (
-        (.metadata.annotations // {} | with_entries(select(.key | startswith("alb.ingress.kubernetes.io/actions.bg-deployment-") | not)))
-        + ($rules | map(.annotations) | add // {})
-      )
-    | .spec.rules[0].http.paths = (
-        if $paths == [] then [{path: "/", pathType: "Prefix", backend: {service: {name: "response-404", port: {name: "use-annotation"}}}}] else $paths end
-      )' <<<"$1"
+    | .metadata.annotations += ($rules | map(.annotations) | add // {})
+    | if $paths == [] then . else .spec.rules[0].http.paths = $paths end' <<<"$1"
 }
 
 rebuild_ingress_main() {
   local links id slug status nrn paths scope_id scope_slug backend rule selected="" owners="" duplicates
-  local ingress_name live base snapshot verb=replace resource_version="" rules="" registry="" report="" ingress file rc=0
+  local ingress_name live base verb=replace resource_version="" rules="" registry="" report="" ingress file rc=0
   local scope_pattern='(^|:)scope=([0-9]+)(:|$)'
-  if ! rebuild_ingress_load; then
-    return 1
-  fi
 
   echo "Listing the links of service $SERVICE_ID"
   if ! links=$(rebuild_ingress_list_links); then
@@ -144,26 +149,20 @@ rebuild_ingress_main() {
     return 1
   fi
 
-  ingress_name=$(last_good_ingress_name)
+  if ! base=$(rebuild_ingress_render); then
+    echo "Error: could not render the ingress from $TEMPLATE. The ingress was not changed."
+    return 1
+  fi
+  ingress_name=$(jq -r '.metadata.name' <<<"$base")
   if ! live=$(kubectl get ingress "$ingress_name" -n "$K8S_NAMESPACE" -o json --ignore-not-found); then
     echo "Error: could not read ingress [$ingress_name]. The ingress was not changed."
     return 1
   fi
   if [[ -n "$live" ]]; then
-    echo "Rebuilding ingress [$ingress_name] from the live ingress"
-    base=$(last_good_clean_ingress <<<"$live")
+    echo "Rebuilding ingress [$ingress_name] from the template and the links"
     resource_version=$(jq -r '.metadata.resourceVersion' <<<"$live")
   else
-    snapshot=$(last_good_read) || rc=$?
-    if (( rc == 2 )); then
-      echo "Error: ingress [$ingress_name] does not exist and there is no last good snapshot $(last_good_name) to take its host and annotations from. The ingress was not changed."
-      return 1
-    fi
-    if (( rc != 0 )) || ! base=$(jq -ce '.data.ingress | fromjson | objects' <<<"$snapshot" 2>/dev/null); then
-      echo "Error: ingress [$ingress_name] does not exist and the snapshot $(last_good_name) could not be read. The ingress was not changed."
-      return 1
-    fi
-    echo "Ingress [$ingress_name] does not exist; rebuilding it from the host and annotations of the snapshot $(last_good_name)"
+    echo "Ingress [$ingress_name] does not exist; creating it from the template and the links"
     verb=create
   fi
 
@@ -196,7 +195,7 @@ rebuild_ingress_main() {
   if [[ "$verb" == "replace" ]]; then
     jq --arg resource_version "$resource_version" '.metadata.resourceVersion = $resource_version' <<<"$ingress" > "$file"
   else
-    printf '%s\n' "$ingress" > "$file"
+    echo "$ingress" > "$file"
   fi
   if ! lease_assert_held 20; then
     return 1
@@ -208,15 +207,13 @@ rebuild_ingress_main() {
 
   if [[ -n "$report" ]]; then
     echo "Links to review:"
-    printf '%s' "$report"
+    echo "${report%$'\n'}"
   fi
 
-  VERIFY_PATHS=$(jq -c '[.spec.rules[0].http.paths[].path] | unique' <<<"$ingress")
   REBUILT_RULES=$(jq -sc . <<<"$registry")
   if ! MAX_WAIT_SECONDS=$(lease_budget "${MAX_WAIT_SECONDS:-120}"); then
     return 1
   fi
-  export VERIFY_PATHS
   export REBUILT_RULES
   export MAX_WAIT_SECONDS
 }

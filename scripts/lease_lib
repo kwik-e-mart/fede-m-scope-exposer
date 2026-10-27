@@ -1,0 +1,96 @@
+#!/bin/bash
+
+lease_name() {
+  echo "exposer-$SERVICE_ID"
+}
+
+lease_now() {
+  date -u +%s
+}
+
+lease_kubectl() {
+  local reason="$1" errors output message rc=0
+  shift
+  if ! errors=$(mktemp); then
+    echo "Error: could not create a temporary file for kubectl $1" >&2
+    return 1
+  fi
+  output=$(kubectl "$@" 2>"$errors" </dev/null) || rc=$?
+  message=$(<"$errors")
+  rm -f "$errors"
+  if (( rc == 0 )); then
+    echo "$output"
+    return 0
+  fi
+  if [[ "$message" == *"($reason)"* ]]; then
+    return 2
+  fi
+  echo "${message:-kubectl exited with $rc}" >&2
+  return 1
+}
+
+lease_get() {
+  lease_kubectl NotFound get lease "$(lease_name)" -n "$K8S_NAMESPACE" -o json
+}
+
+lease_state() {
+  jq -r '[
+    ((.spec.renewTime // .spec.acquireTime // "1970-01-01T00:00:00Z") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) + (.spec.leaseDurationSeconds // 0),
+    (.spec.leaseTransitions // 0),
+    .metadata.resourceVersion,
+    (.spec.holderIdentity // "")
+  ] | @tsv' <<<"$1"
+}
+
+lease_remaining() {
+  local lease state rc=0 expires transitions resource_version holder
+  lease=$(lease_get) || rc=$?
+  if (( rc == 2 )); then
+    echo "Error: the Lease $(lease_name) does not exist" >&2
+    return 1
+  fi
+  if (( rc != 0 )); then
+    echo "Error: could not read the Lease $(lease_name)" >&2
+    return 1
+  fi
+  if ! state=$(lease_state "$lease"); then
+    echo "Error: invalid Lease $(lease_name): $lease" >&2
+    return 1
+  fi
+  IFS=$'\t' read -r expires transitions resource_version holder <<<"$state"
+  if [[ "$holder" != "$ACTION_ID" ]]; then
+    echo "Error: the Lease $(lease_name) is held by ${holder:-nobody}, not by this action" >&2
+    return 1
+  fi
+  echo $((expires - $(lease_now)))
+}
+
+lease_assert_held() {
+  local needed="$1" remaining
+  if ! remaining=$(lease_remaining); then
+    echo "Nothing was written; run restore-ingress to return the ingress to the last successfully applied snapshot."
+    return 1
+  fi
+  if (( remaining < needed )); then
+    if (( remaining < 0 )); then
+      remaining=0
+    fi
+    echo "Error: the Lease $(lease_name) has ${remaining}s left and this write needs ${needed}s. Nothing was written; run restore-ingress to return the ingress to the last successfully applied snapshot."
+    return 1
+  fi
+}
+
+lease_budget() {
+  local limit="$1" remaining
+  if ! remaining=$(lease_remaining); then
+    return 1
+  fi
+  remaining=$((remaining - 10))
+  if (( remaining < limit )); then
+    limit="$remaining"
+  fi
+  if (( limit < 0 )); then
+    limit=0
+  fi
+  echo "$limit"
+}

@@ -1,0 +1,28 @@
+#!/bin/bash
+
+last_successfully_applied_name() {
+  echo "exposer-$SERVICE_ID-last-successfully-applied"
+}
+
+last_successfully_applied_ingress_name() {
+  echo "k-8-s-$SERVICE_NAME-$SERVICE_ID-public"
+}
+
+last_successfully_applied_read() {
+  local errors snapshot message rc=0
+  if ! errors=$(mktemp); then
+    echo "Error: could not create a temporary file to read the last successfully applied snapshot" >&2
+    return 1
+  fi
+  snapshot=$(kubectl get configmap "$(last_successfully_applied_name)" -n "$K8S_NAMESPACE" -o json 2>"$errors" </dev/null) || rc=$?
+  message=$(<"$errors")
+  rm -f "$errors"
+  if (( rc != 0 )); then
+    if [[ "$message" == *"(NotFound)"* ]]; then
+      return 2
+    fi
+    echo "Error: could not read the last successfully applied snapshot $(last_successfully_applied_name) in namespace $K8S_NAMESPACE: ${message:-kubectl exited with $rc}" >&2
+    return 1
+  fi
+  echo "$snapshot"
+}

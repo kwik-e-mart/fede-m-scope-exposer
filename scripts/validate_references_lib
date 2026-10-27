@@ -1,0 +1,118 @@
+#!/bin/bash
+
+source "$(dirname "${BASH_SOURCE[0]}")/ingress_service_refs" || return 1
+
+fetch_service() {
+  local namespace="$1" name="$2" errors service message rc=0
+  if ! errors=$(mktemp); then
+    echo "Error: could not create a temporary file to read service $name" >&2
+    return 1
+  fi
+  service=$(kubectl get service "$name" -n "$namespace" -o json 2>"$errors" </dev/null) || rc=$?
+  message=$(<"$errors")
+  rm -f "$errors"
+  if (( rc != 0 )); then
+    if [[ "$message" == *"(NotFound)"* ]]; then
+      return 2
+    fi
+    echo "Error: could not read service $name in namespace $namespace: ${message:-kubectl exited with $rc}" >&2
+    return 1
+  fi
+  if ! jq -e '.kind == "Service"' <<<"$service" >/dev/null 2>&1; then
+    echo "Error: invalid response reading service $name in namespace $namespace: $service" >&2
+    return 1
+  fi
+  echo "$service"
+}
+
+service_exposes_port() {
+  local service="$1" port="${2:--}"
+  if [[ "$port" == "-" ]]; then
+    return 0
+  fi
+  if jq -e --arg port "$port" '
+    if ($port | test("^[0-9]+$")) then
+      any(.spec.ports[]?; .port == ($port | tonumber))
+    else
+      any(.spec.ports[]?; .name == $port)
+    end' <<<"$service" >/dev/null; then
+    return 0
+  fi
+  return 2
+}
+
+service_exists() {
+  local namespace="$1" name="$2" port="${3:--}" service rc=0
+  service=$(fetch_service "$namespace" "$name") || rc=$?
+  if (( rc == 2 )); then
+    echo "service $name does not exist in namespace $namespace" >&2
+    return 2
+  fi
+  if (( rc != 0 )); then
+    return 1
+  fi
+  if ! service_exposes_port "$service" "$port"; then
+    echo "service $name in namespace $namespace does not expose port $port" >&2
+    return 2
+  fi
+}
+
+validate_references_for_ingress() {
+  local ingress="$1" paths="${2:-null}" namespace="${K8S_NAMESPACE-}" refs ingress_name path name port target
+  local cache='{}' entry service rc checked=0 invalid=0 failed=0
+  if [[ -z "$namespace" ]]; then
+    echo "Error: K8S_NAMESPACE is empty" >&2
+    return 1
+  fi
+  if ! refs=$(ingress_service_refs "$paths" <<<"$ingress" 2>&1); then
+    echo "Error: could not read the service references of the ingress: ${refs##*$'\n'}" >&2
+    return 1
+  fi
+  while IFS=$'\t' read -r ingress_name path name port; do
+    if [[ -z "$name" ]]; then
+      continue
+    fi
+    checked=$((checked + 1))
+    target="$name"
+    if [[ "$port" != "-" ]]; then
+      target="$name:$port"
+    fi
+    entry=$(jq -c --arg name "$name" '.[$name] // empty' <<<"$cache")
+    if [[ -z "$entry" ]]; then
+      rc=0
+      service=$(fetch_service "$namespace" "$name" 2>&1) || rc=$?
+      if (( rc == 0 )); then
+        entry=$(jq -c '{rc: 0, service: .}' <<<"$service")
+      else
+        entry=$(jq -nc --argjson rc "$rc" --arg detail "${service#Error: }" '{rc: $rc, detail: $detail}')
+      fi
+      cache=$(jq -c --arg name "$name" --argjson entry "$entry" '.[$name] = $entry' <<<"$cache")
+    fi
+    rc=$(jq -r '.rc' <<<"$entry")
+    if (( rc == 2 )); then
+      echo "✗ $ingress_name $path → $target: service does not exist in namespace $namespace" >&2
+      invalid=$((invalid + 1))
+    elif (( rc != 0 )); then
+      echo "✗ $ingress_name $path → $target: $(jq -r '.detail' <<<"$entry")" >&2
+      failed=$((failed + 1))
+    elif ! service_exposes_port "$(jq -c '.service' <<<"$entry")" "$port"; then
+      echo "✗ $ingress_name $path → $target: service does not expose port $port" >&2
+      invalid=$((invalid + 1))
+    else
+      echo "✓ $ingress_name $path → $target" >&2
+    fi
+  done <<<"$refs"
+  if (( failed > 0 && invalid > 0 )); then
+    echo "Error: $failed of $checked service reference(s) could not be verified and $invalid invalid" >&2
+    return 1
+  fi
+  if (( failed > 0 )); then
+    echo "Error: $failed of $checked service reference(s) could not be verified" >&2
+    return 1
+  fi
+  if (( invalid > 0 )); then
+    echo "$invalid invalid service reference(s) of $checked" >&2
+    return 2
+  fi
+  echo "$checked service reference(s) are valid" >&2
+}

@@ -1,0 +1,157 @@
+#!/bin/bash
+
+if ! source "$(dirname "${BASH_SOURCE[0]}")/lease_lib"; then
+  echo "Error: could not load lease_lib from $(dirname "${BASH_SOURCE[0]}")"
+  exit 1
+fi
+
+if ! source "$(dirname "${BASH_SOURCE[0]}")/last_successfully_applied_lib"; then
+  echo "Error: could not load last_successfully_applied_lib from $(dirname "${BASH_SOURCE[0]}")"
+  exit 1
+fi
+
+last_successfully_applied_clean_ingress() {
+  jq -c '{
+    apiVersion,
+    kind,
+    metadata: {
+      name: .metadata.name,
+      namespace: .metadata.namespace,
+      labels: (.metadata.labels // {}),
+      annotations: ((.metadata.annotations // {}) | del(.["kubectl.kubernetes.io/last-applied-configuration"]))
+    },
+    spec
+  }'
+}
+
+last_successfully_applied_manifest() {
+  local ingress="$1" resource_version="$2"
+  jq -n \
+    --arg name "$(last_successfully_applied_name)" \
+    --arg namespace "$K8S_NAMESPACE" \
+    --arg service_id "$SERVICE_ID" \
+    --arg resource_version "$resource_version" \
+    --arg ingress "$ingress" \
+    --arg action "$ACTION_NAME" \
+    --arg action_id "$ACTION_ID" \
+    --arg token "$LEASE_TOKEN" \
+    --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
+    apiVersion: "v1",
+    kind: "ConfigMap",
+    metadata: {name: $name, namespace: $namespace, labels: {nullplatform: "true", service_id: $service_id}},
+    data: {ingress: $ingress, action: $action, action_id: $action_id, token: $token, date: $date}
+  }
+  | if $resource_version == "" then . else .metadata.resourceVersion = $resource_version end'
+}
+
+last_successfully_applied_token() {
+  jq -r '.data.token // "0"' <<<"$1"
+}
+
+last_successfully_applied_write() {
+  local reason="$1" verb="$2" file="$3" errors output message rc=0
+  if ! errors=$(mktemp); then
+    echo "Error: could not create a temporary file for kubectl $verb" >&2
+    return 1
+  fi
+  output=$(kubectl "$verb" -f "$file" 2>"$errors" </dev/null) || rc=$?
+  message=$(<"$errors")
+  rm -f "$errors"
+  if (( rc == 0 )); then
+    echo "$output"
+    return 0
+  fi
+  if [[ "$message" == *"($reason)"* ]]; then
+    return 2
+  fi
+  echo "${message:-kubectl exited with $rc}" >&2
+  return 1
+}
+
+last_successfully_applied_save() {
+  local ingress_name live snapshot saved resource_version verb reason file rc
+  if [[ ! "${LEASE_TOKEN-}" =~ ^[0-9]+$ ]]; then
+    echo "Error: LEASE_TOKEN is not set; take the Lease before saving the last successfully applied snapshot"
+    return 1
+  fi
+  ingress_name=$(last_successfully_applied_ingress_name)
+  if ! live=$(kubectl get ingress "$ingress_name" -n "$K8S_NAMESPACE" -o json); then
+    echo "Error: could not read ingress [$ingress_name] to save the last successfully applied snapshot"
+    return 1
+  fi
+  file="$OUTPUT_DIR/$(last_successfully_applied_name).json"
+  while true; do
+    rc=0
+    snapshot=$(last_successfully_applied_read) || rc=$?
+    if (( rc == 1 )); then
+      return 1
+    fi
+    verb=create
+    reason=AlreadyExists
+    resource_version=""
+    if (( rc == 0 )); then
+      saved=$(last_successfully_applied_token "$snapshot")
+      if [[ ! "$saved" =~ ^[0-9]+$ ]]; then
+        echo "Error: the last successfully applied snapshot $(last_successfully_applied_name) has an invalid token '$saved'"
+        return 1
+      fi
+      if (( saved >= LEASE_TOKEN )); then
+        echo "Kept the last successfully applied snapshot $(last_successfully_applied_name): its token $saved is not older than this action's token $LEASE_TOKEN"
+        return 0
+      fi
+      verb=replace
+      reason=Conflict
+      resource_version=$(jq -r '.metadata.resourceVersion' <<<"$snapshot")
+    fi
+    if ! last_successfully_applied_manifest "$(last_successfully_applied_clean_ingress <<<"$live")" "$resource_version" > "$file"; then
+      echo "Error: could not build the last successfully applied snapshot of ingress [$ingress_name]"
+      return 1
+    fi
+    if ! lease_assert_held 10; then
+      return 1
+    fi
+    rc=0
+    last_successfully_applied_write "$reason" "$verb" "$file" || rc=$?
+    if (( rc == 0 )); then
+      echo "✓ Saved ingress [$ingress_name] as the last successfully applied snapshot $(last_successfully_applied_name) (token $LEASE_TOKEN)"
+      return 0
+    fi
+    if (( rc == 1 )); then
+      echo "Error: could not save the last successfully applied snapshot $(last_successfully_applied_name)"
+      return 1
+    fi
+    echo "The last successfully applied snapshot $(last_successfully_applied_name) changed meanwhile; reading it again"
+  done
+}
+
+last_successfully_applied_delete() {
+  if ! kubectl delete configmap "$(last_successfully_applied_name)" -n "$K8S_NAMESPACE" --ignore-not-found; then
+    echo "Error: could not delete the last successfully applied snapshot $(last_successfully_applied_name)"
+    return 1
+  fi
+}
+
+last_successfully_applied_main() {
+  case "${LAST_SUCCESSFULLY_APPLIED_ACTION-}" in
+    save)
+      if [[ "${ALB_RECONCILIATION_ENABLED:-false}" != "true" ]]; then
+        echo "⚠ Skipping the last successfully applied snapshot: ALB_RECONCILIATION_ENABLED is not true, so the ingress was not verified in the ALB"
+        return 0
+      fi
+      last_successfully_applied_save
+      ;;
+    delete)
+      last_successfully_applied_delete
+      ;;
+    *)
+      echo "Error: LAST_SUCCESSFULLY_APPLIED_ACTION must be save or delete, got '${LAST_SUCCESSFULLY_APPLIED_ACTION-}'"
+      return 1
+      ;;
+  esac
+}
+
+set -euo pipefail
+
+if ! last_successfully_applied_main; then
+  exit 1
+fi

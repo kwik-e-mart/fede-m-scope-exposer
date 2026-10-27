@@ -7,6 +7,8 @@ steps:
         type: environment
       - name: ALB_NAME
         type: environment
+      - name: VISIBILITY
+        type: environment
   - name: "build context"
     type: script
     file: "$SERVICE_PATH/scripts/build_service_context"
@@ -29,20 +31,22 @@ steps:
   - name: "rebuild_ingress"
     type: script
     file: "$SERVICE_PATH/scripts/rebuild_ingress"
+    configuration:
+      TEMPLATE: "$SERVICE_PATH/templates/empty.yaml.tpl"
     output:
-      - name: VERIFY_PATHS
-        type: environment
       - name: REBUILT_RULES
         type: environment
     post:
       name: wait ingress_reconciliation
       type: script
       file: "$SERVICE_PATH/scripts/verify_ingress_reconciliation"
-  - name: "last_good"
+      configuration:
+        VERIFY_SCOPE: all
+  - name: "last_successfully_applied"
     type: script
-    file: "$SERVICE_PATH/scripts/last_good"
+    file: "$SERVICE_PATH/scripts/last_successfully_applied"
     configuration:
-      LAST_GOOD_ACTION: save
+      LAST_SUCCESSFULLY_APPLIED_ACTION: save
   - name: "realign_service_rules"
     type: script
     file: "$SERVICE_PATH/scripts/update_service"

@@ -49,7 +49,7 @@ load_ingress_service_refs() {
     echo "No se encontró el extractor de referencias en '${INGRESS_SERVICE_REFS_PATH-}' (INGRESS_SERVICE_REFS_PATH)"
     return 1
   fi
-  if ! source "$INGRESS_SERVICE_REFS_PATH" || ! declare -F ingress_service_refs >/dev/null; then
+  if ! source "$INGRESS_SERVICE_REFS_PATH"; then
     echo "No se pudo cargar ingress_service_refs desde $INGRESS_SERVICE_REFS_PATH"
     return 1
   fi

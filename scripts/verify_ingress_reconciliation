@@ -1,5 +1,10 @@
 #!/bin/bash
 
+if ! source "$(dirname "${BASH_SOURCE[0]}")/ingress_service_refs"; then
+    echo "✗ Could not load ingress_service_refs"
+    return 1
+fi
+
 ALB_NAME=$(echo "$CONTEXT" | jq -r .alb_name)
 EXPOSER_DOMAIN=$(echo "$CONTEXT" | jq -r '.parameters.domain // .service.attributes.domain')
 
@@ -10,13 +15,30 @@ INGRESS_NAME="k-8-s-$SERVICE_SLUG-$SERVICE_ID-public"
 MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-120}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-10}"
 RECONCILIATION_EXPECTATION="${RECONCILIATION_EXPECTATION-present}"
-EXPECTED_PATHS="${VERIFY_PATHS:-${RULE_PATHS:-[]}}"
+VERIFY_SCOPE="${VERIFY_SCOPE-link}"
 elapsed=0
 
 case "$RECONCILIATION_EXPECTATION" in
     present|absent) ;;
     *)
         echo "✗ Invalid RECONCILIATION_EXPECTATION [$RECONCILIATION_EXPECTATION]: expected present or absent"
+        return 1
+        ;;
+esac
+
+case "$VERIFY_SCOPE" in
+    link)
+        EXPECTED_PATHS="${RULE_PATHS:-[]}"
+        ;;
+    all)
+        if ! INGRESS_JSON=$(kubectl get ingress "$INGRESS_NAME" -n "$K8S_NAMESPACE" -o json --ignore-not-found); then
+            echo "✗ Failed to get ingress [$INGRESS_NAME]"
+            return 1
+        fi
+        EXPECTED_PATHS=$(jq -c '[.spec.rules[]?.http.paths[]?.path] | unique' <<< "${INGRESS_JSON:-null}")
+        ;;
+    *)
+        echo "✗ Invalid VERIFY_SCOPE [$VERIFY_SCOPE]: expected link or all"
         return 1
         ;;
 esac
@@ -54,7 +76,7 @@ if [ -z "$AWS_REGION_EFFECTIVE" ]; then
     exit 1
 fi
 
-if ! INGRESS_JSON=$(kubectl get ingress "$INGRESS_NAME" -n "$K8S_NAMESPACE" -o json --ignore-not-found); then
+if [ "$VERIFY_SCOPE" = "link" ] && ! INGRESS_JSON=$(kubectl get ingress "$INGRESS_NAME" -n "$K8S_NAMESPACE" -o json --ignore-not-found); then
     echo "✗ Failed to get ingress [$INGRESS_NAME]"
     return 1
 fi
@@ -181,11 +203,6 @@ fi
 LINK_NAMES=""
 
 if [ "$ALB_RECONCILIATION_ENABLED" = "true" ]; then
-    if ! declare -F ingress_service_refs >/dev/null && ! source "$(dirname "${BASH_SOURCE[0]}")/ingress_service_refs"; then
-        echo "✗ Could not load ingress_service_refs"
-        return 1
-    fi
-
     if ! LINK_REFS=$(ingress_service_refs "$EXPECTED_PATHS" <<< "$INGRESS_JSON" 2>&1); then
         echo "✗ Could not read the services referenced by paths $EXPECTED_PATHS in ingress [$INGRESS_NAME]: ${LINK_REFS##*$'\n'}"
         return 1
@@ -337,7 +354,7 @@ validate_alb_config() {
             return 1
         fi
 
-        if ! all_rules=$(printf '%s\n%s' "$all_rules" "$rules" | jq -sc '.[0] + .[1].Rules'); then
+        if ! all_rules=$(echo "$all_rules" "$rules" | jq -sc '.[0] + .[1].Rules'); then
             echo "✗ Could not parse rules for listener [$listener_arn]"
             return 1
         fi
@@ -370,7 +387,7 @@ validate_alb_config() {
         fi
     done
 
-    printf '%s' "$report"
+    echo "${report%$'\n'}"
 
     if [ "$all_ok" = "true" ]; then
         echo "✓ All expected rules are reconciled in ALB"
@@ -452,13 +469,13 @@ while [ "$elapsed" -lt "$MAX_WAIT_SECONDS" ]; do
 
             if [ -n "$context" ]; then
                 echo "Failure events not attributable to paths $EXPECTED_PATHS, still waiting for the ALB:"
-                printf '%s' "$context"
+                echo "${context%$'\n'}"
             fi
         fi
 
         if [ -n "$attributable" ]; then
             echo "✗ The ingress could not be reconciled"
-            printf '%s' "$attributable"
+            echo "${attributable%$'\n'}"
 
             if [[ "$attributable" == *"no certificate found for host"* ]]; then
                 echo "Root cause: The ingress hostname does not match any available SSL/TLS certificate"

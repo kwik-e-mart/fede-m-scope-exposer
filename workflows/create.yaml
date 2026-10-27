@@ -56,8 +56,8 @@ steps:
       file: "$SERVICE_PATH/scripts/verify_ingress_reconciliation"
       configuration:
         IS_SERVICE_CREATION: true
-  - name: "last_good"
+  - name: "last_successfully_applied"
     type: script
-    file: "$SERVICE_PATH/scripts/last_good"
+    file: "$SERVICE_PATH/scripts/last_successfully_applied"
     configuration:
-      LAST_GOOD_ACTION: save
+      LAST_SUCCESSFULLY_APPLIED_ACTION: save

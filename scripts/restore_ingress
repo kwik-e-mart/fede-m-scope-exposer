@@ -1,109 +1,12 @@
 #!/bin/bash
 
-restore_ingress_load() {
-  local dir
-  dir="$(dirname "${BASH_SOURCE[0]}")"
-  if ! LAST_GOOD_LIB_ONLY=true source "$dir/last_good" || ! VALIDATE_REFERENCES_LIB_ONLY=true source "$dir/validate_references"; then
-    echo "Error: could not load last_good and validate_references from $dir"
-    return 1
-  fi
-}
-
-restore_ingress_paths() {
-  jq -r '.spec.rules[]?.http.paths[]?.path' <<<"$1"
-}
-
-restore_ingress_backend() {
-  jq -c --arg path "$2" '
-    (.metadata.annotations // {}) as $annotations
-    | first(.spec.rules[]?.http.paths[]? | select(.path == $path))
-    | [.backend, $annotations["alb.ingress.kubernetes.io/actions.\(.backend.service.name // "")"]]' <<<"$1"
-}
-
-restore_ingress_changes() {
-  local snapshot="$1" live="$2" path desired current changed=false
-  while IFS= read -r path; do
-    desired=$(restore_ingress_backend "$snapshot" "$path")
-    current=$(restore_ingress_backend "$live" "$path")
-    if [[ -z "$current" ]]; then
-      echo "  + $path: missing from the live ingress"
-    elif [[ -z "$desired" ]]; then
-      echo "  - $path: not in the snapshot, will be removed"
-    elif [[ "$desired" != "$current" ]]; then
-      echo "  ~ $path: backend or weights differ"
-    else
-      continue
-    fi
-    changed=true
-  done < <({ restore_ingress_paths "$snapshot"; restore_ingress_paths "$live"; } | LC_ALL=C sort -u)
-  if [[ "$changed" == "false" ]]; then
-    echo "  no path changes"
-  fi
-}
-
-restore_ingress_snapshot() {
-  local snapshot ingress rc=0
-  snapshot=$(last_good_read) || rc=$?
-  if (( rc == 2 )); then
-    echo "Error: there is no last good snapshot $(last_good_name) in namespace $K8S_NAMESPACE. Run rebuild-ingress to rebuild the ingress from the exposer's links." >&2
-    return 2
-  fi
-  if (( rc != 0 )); then
-    return 1
-  fi
-  if ! ingress=$(jq -ce '.data.ingress | fromjson | objects' <<<"$snapshot" 2>/dev/null); then
-    echo "Error: the snapshot $(last_good_name) does not hold a valid ingress. Run rebuild-ingress to rebuild the ingress from the exposer's links." >&2
-    return 2
-  fi
-  echo "Restoring ingress [$(jq -r '.metadata.name' <<<"$ingress")] from the snapshot saved by $(jq -r '"\(.data.action) at \(.data.date)"' <<<"$snapshot")" >&2
-  echo "Validating the services referenced by the snapshot" >&2
-  validate_references_for_ingress "$ingress" || rc=$?
-  if (( rc == 2 )); then
-    echo "Error: the snapshot references services that do not exist or do not expose the port. Run rebuild-ingress to rebuild the ingress from the exposer's links." >&2
-    return 2
-  fi
-  if (( rc != 0 )); then
-    return 1
-  fi
-  printf '%s\n' "$ingress"
-}
-
-restore_ingress_replace() {
-  local ingress="$1" ingress_name live verb=replace file
-  ingress_name=$(jq -r '.metadata.name' <<<"$ingress")
-  if ! live=$(kubectl get ingress "$ingress_name" -n "$K8S_NAMESPACE" -o json --ignore-not-found); then
-    echo "Error: could not read ingress [$ingress_name]."
-    return 1
-  fi
-  file="$OUTPUT_DIR/ingress-$SERVICE_ID-last-good.json"
-  if [[ -z "$live" ]]; then
-    verb=create
-    live='{}'
-    printf '%s\n' "$ingress" > "$file"
-  else
-    jq --arg resource_version "$(jq -r '.metadata.resourceVersion' <<<"$live")" '.metadata.resourceVersion = $resource_version' <<<"$ingress" > "$file"
-  fi
-
-  echo "Paths that change in ingress [$ingress_name]:"
-  restore_ingress_changes "$ingress" "$live"
-
-  if ! lease_assert_held 20; then
-    return 1
-  fi
-  if ! kubectl "$verb" --save-config -f "$file"; then
-    echo "Error: could not $verb ingress [$ingress_name]. If it changed meanwhile, run restore-ingress again."
-    return 1
-  fi
-
-  VERIFY_PATHS=$(jq -c '[.spec.rules[]?.http.paths[]?.path] | unique' <<<"$ingress")
-  export VERIFY_PATHS
-}
+if ! source "$(dirname "${BASH_SOURCE[0]}")/restore_ingress_lib"; then
+  echo "Error: could not load restore_ingress_lib from $(dirname "${BASH_SOURCE[0]}")"
+  exit 1
+fi
 
 restore_ingress_main() {
   local ingress rc=0
-  if ! restore_ingress_load; then
-    return 1
-  fi
   ingress=$(restore_ingress_snapshot) || rc=$?
   if (( rc == 2 )); then
     echo "The ingress was not changed."
@@ -121,18 +24,6 @@ restore_ingress_main() {
   fi
   export MAX_WAIT_SECONDS
 }
-
-case "${RESTORE_INGRESS_LIB_ONLY-false}" in
-  true)
-    return 0
-    ;;
-  false)
-    ;;
-  *)
-    echo "Error: RESTORE_INGRESS_LIB_ONLY must be true or false, got '$RESTORE_INGRESS_LIB_ONLY'"
-    exit 1
-    ;;
-esac
 
 set -euo pipefail
 

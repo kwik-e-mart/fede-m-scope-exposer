@@ -1,1 +1,1 @@
-steps:
+steps: # no action needed on scope exposer update, define the workflow so updates do not fail.

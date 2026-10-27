@@ -1,0 +1,64 @@
+#!/bin/bash
+
+if ! source "$(dirname "${BASH_SOURCE[0]}")/restore_ingress_lib"; then
+  echo "Error: could not load restore_ingress_lib from $(dirname "${BASH_SOURCE[0]}")"
+  exit 1
+fi
+
+VERIFY_OR_REAPPLY_DIR="$(dirname "${BASH_SOURCE[0]}")"
+VERIFY_OR_REAPPLY_SECONDS=40
+
+verify_or_reapply_reconciliation() {
+  local budget
+  if ! budget=$(lease_budget "${MAX_WAIT_SECONDS:-120}"); then
+    return 1
+  fi
+  ( MAX_WAIT_SECONDS="$budget"; source "$VERIFY_OR_REAPPLY_DIR/verify_ingress_reconciliation" )
+}
+
+verify_or_reapply_restore() {
+  local remaining ingress rc=0
+  if ! remaining=$(lease_remaining); then
+    echo "The last successfully applied snapshot was not re-applied. Run restore-ingress to return the ingress to it."
+    return 1
+  fi
+  if (( remaining < VERIFY_OR_REAPPLY_SECONDS )); then
+    echo "Error: the Lease $(lease_name) has ${remaining}s left, less than the ${VERIFY_OR_REAPPLY_SECONDS}s a re-apply needs. The last successfully applied snapshot was not re-applied; run restore-ingress to return the ingress to it."
+    return 1
+  fi
+  echo "Re-applying the last successfully applied snapshot $(last_successfully_applied_name)"
+  ingress=$(restore_ingress_snapshot) || rc=$?
+  if (( rc == 2 )); then
+    echo "The last successfully applied snapshot was not re-applied; the ingress keeps the change that failed."
+    return 1
+  fi
+  if (( rc != 0 )); then
+    echo "The last successfully applied snapshot was not re-applied; the ingress keeps the change that failed. Run restore-ingress once the cause above is fixed."
+    return 1
+  fi
+  if ! restore_ingress_replace "$ingress"; then
+    echo "The last successfully applied snapshot was not re-applied; the ingress keeps the change that failed."
+    return 1
+  fi
+  if ! RECONCILIATION_EXPECTATION=present VERIFY_SCOPE=all verify_or_reapply_reconciliation; then
+    echo "Error: the last successfully applied snapshot was re-applied but its verification failed. Run restore-ingress, or rebuild-ingress if it fails again."
+    return 1
+  fi
+}
+
+verify_or_reapply_main() {
+  if verify_or_reapply_reconciliation; then
+    return 0
+  fi
+  echo "The change to the ingress failed"
+  if verify_or_reapply_restore; then
+    echo "Error: the change failed; the last successfully applied snapshot was re-applied and verified, so the ingress is back to its last successfully applied state."
+  fi
+  return 1
+}
+
+set -euo pipefail
+
+if ! verify_or_reapply_main; then
+  exit 1
+fi

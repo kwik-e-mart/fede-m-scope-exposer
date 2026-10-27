@@ -4,9 +4,9 @@ steps:
   - name: apply
     configuration:
       ACTION: delete
-  - name: "last_good"
+  - name: "last_successfully_applied"
     configuration:
-      LAST_GOOD_ACTION: delete
+      LAST_SUCCESSFULLY_APPLIED_ACTION: delete
   - name: "delete lease"
     type: script
     file: "$SERVICE_PATH/scripts/lease"
