@@ -81,6 +81,7 @@ restore_ingress_replace() {
 
   echo "Paths that change in ingress [$ingress_name]:"
   restore_ingress_changes "$ingress" "$live"
+  REMOVED_PATHS=$(jq -cn --argjson old "$live" --argjson new "$ingress" '[$old | .spec.rules[]?.http.paths[]?.path] - [$new | .spec.rules[]?.http.paths[]?.path] | unique')
 
   if ! lease_assert_held 20; then
     return 1

@@ -211,10 +211,11 @@ rebuild_ingress_main() {
   fi
 
   REBUILT_RULES=$(jq -sc . <<<"$registry")
+  REMOVED_PATHS=$(jq -cn --argjson old "${live:-null}" --argjson new "$ingress" '[$old | .spec.rules[]?.http.paths[]?.path] - [$new | .spec.rules[]?.http.paths[]?.path] | unique')
   if ! MAX_WAIT_SECONDS=$(lease_budget "${MAX_WAIT_SECONDS:-120}"); then
     return 1
   fi
-  export REBUILT_RULES
+  export REBUILT_RULES REMOVED_PATHS
   export MAX_WAIT_SECONDS
 }
 

@@ -16,6 +16,7 @@ MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-120}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-10}"
 RECONCILIATION_EXPECTATION="${RECONCILIATION_EXPECTATION-present}"
 VERIFY_SCOPE="${VERIFY_SCOPE-link}"
+REMOVED_PATHS="${REMOVED_PATHS:-[]}"
 elapsed=0
 
 case "$RECONCILIATION_EXPECTATION" in
@@ -43,15 +44,19 @@ case "$VERIFY_SCOPE" in
         ;;
 esac
 
-if ! jq -e 'type == "array" and all(.[]; type == "string")' <<< "$EXPECTED_PATHS" >/dev/null 2>&1; then
-    echo "✗ Paths to verify must be a JSON array of strings, got [$EXPECTED_PATHS]"
-    return 1
-fi
+for paths in "$EXPECTED_PATHS" "$REMOVED_PATHS"; do
+    if ! jq -e 'type == "array" and all(.[]; type == "string")' <<< "$paths" >/dev/null 2>&1; then
+        echo "✗ Paths to verify must be a JSON array of strings, got [$paths]"
+        return 1
+    fi
+done
 
 if [ "$EXPECTED_PATHS" = "[]" ]; then
     echo "Waiting for ingress [$INGRESS_NAME] reconciliation..."
-else
+elif [ "$REMOVED_PATHS" = "[]" ]; then
     echo "Waiting for ingress [$INGRESS_NAME] reconciliation (paths $EXPECTED_PATHS expected $RECONCILIATION_EXPECTATION)..."
+else
+    echo "Waiting for ingress [$INGRESS_NAME] reconciliation (paths $EXPECTED_PATHS expected $RECONCILIATION_EXPECTATION, removed paths $REMOVED_PATHS expected absent)..."
 fi
 
 ALB_RECONCILIATION_ENABLED="${ALB_RECONCILIATION_ENABLED:-false}"
@@ -81,7 +86,7 @@ if [ "$VERIFY_SCOPE" = "link" ] && ! INGRESS_JSON=$(kubectl get ingress "$INGRES
     return 1
 fi
 
-if [ -z "$INGRESS_JSON" ]; then
+if [ -z "$INGRESS_JSON" ] && [ "$ALB_RECONCILIATION_ENABLED" != "true" ]; then
     echo "✓ Ingress [$INGRESS_NAME] does not exist, nothing to reconcile"
     return 0
 fi
@@ -187,6 +192,11 @@ if [ "$ALB_RECONCILIATION_ENABLED" = "true" ]; then
             EXPECTED_DETAILS+=("$detail")
         fi
     done < <(declared_paths)
+    while IFS= read -r path; do
+        EXPECTED_PATH_LIST+=("$path")
+        EXPECTED_KINDS+=("absent")
+        EXPECTED_DETAILS+=("")
+    done < <(jq -r '.[]' <<< "$REMOVED_PATHS")
 fi
 
 if [ "${#PATH_ERRORS[@]}" -gt 0 ]; then
@@ -202,7 +212,7 @@ fi
 
 LINK_NAMES=""
 
-if [ "$ALB_RECONCILIATION_ENABLED" = "true" ]; then
+if [ "$ALB_RECONCILIATION_ENABLED" = "true" ] && [ -n "$INGRESS_JSON" ]; then
     if ! LINK_REFS=$(ingress_service_refs "$EXPECTED_PATHS" <<< "$INGRESS_JSON" 2>&1); then
         echo "✗ Could not read the services referenced by paths $EXPECTED_PATHS in ingress [$INGRESS_NAME]: ${LINK_REFS##*$'\n'}"
         return 1
@@ -251,6 +261,10 @@ alb_rules_for_path() {
         map(select((condition_values("host-header") | index($domain)) != null
             and any(condition_values("path-pattern")[]; IN($patterns[]))
             and all(.Actions[]?; .Type != "redirect")))' <<< "$1"
+}
+
+domain_has_rules() {
+    jq -e --arg domain "$EXPOSER_DOMAIN" "$ALB_CONDITION_VALUES_JQ"' any(.[]; condition_values("host-header") | index($domain) != null)' <<< "$1" >/dev/null
 }
 
 rule_count() {
@@ -362,8 +376,18 @@ validate_alb_config() {
 
     echo "Checking domain: $EXPOSER_DOMAIN"
 
+    if [ -z "$INGRESS_JSON" ]; then
+        if ! domain_has_rules "$all_rules"; then
+            echo "✓ No rules for the domain are left in ALB"
+            return 0
+        fi
+
+        echo "  ✗ Domain still in ALB rules: $EXPOSER_DOMAIN"
+        return 2
+    fi
+
     if [ "${#EXPECTED_PATH_LIST[@]}" -eq 0 ]; then
-        if jq -e --arg domain "$EXPOSER_DOMAIN" "$ALB_CONDITION_VALUES_JQ"' any(.[]; condition_values("host-header") | index($domain) != null)' <<< "$all_rules" >/dev/null; then
+        if domain_has_rules "$all_rules"; then
             echo "✓ Domain rule is configured in ALB"
             return 0
         fi
@@ -419,6 +443,30 @@ is_attributable() {
 active_failures() {
     jq -r --arg since "$2" '.[] | select(.lastTimestamp > $since) | [.reason, .message] | @tsv' <<< "$1"
 }
+
+if [ -z "$INGRESS_JSON" ]; then
+    echo "Ingress [$INGRESS_NAME] does not exist, waiting until no ALB rule has domain [$EXPOSER_DOMAIN]"
+    while [ "$elapsed" -lt "$MAX_WAIT_SECONDS" ]; do
+        if validate_alb_config; then
+            echo "✓ ALB configuration validated successfully"
+            return 0
+        else
+            alb_status=$?
+        fi
+
+        if [ "$alb_status" -ne 2 ]; then
+            return 1
+        fi
+
+        echo "Waiting for ALB reconciliation... (${elapsed}s/${MAX_WAIT_SECONDS}s)"
+        sleep "$CHECK_INTERVAL"
+        elapsed=$((elapsed + CHECK_INTERVAL))
+    done
+
+    echo "✗ Timeout waiting for the ALB to drop the rules of domain [$EXPOSER_DOMAIN] after ${MAX_WAIT_SECONDS} seconds"
+    echo "Check the ALB Ingress Controller logs: kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller"
+    exit 1
+fi
 
 LOGGED_CONTEXT=""
 

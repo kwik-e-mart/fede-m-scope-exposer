@@ -22,7 +22,7 @@ restore_ingress_main() {
   if ! MAX_WAIT_SECONDS=$(lease_budget "${MAX_WAIT_SECONDS:-120}"); then
     return 1
   fi
-  export MAX_WAIT_SECONDS
+  export MAX_WAIT_SECONDS REMOVED_PATHS
 }
 
 set -euo pipefail

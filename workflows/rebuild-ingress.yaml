@@ -36,6 +36,8 @@ steps:
     output:
       - name: REBUILT_RULES
         type: environment
+      - name: REMOVED_PATHS
+        type: environment
     post:
       name: wait ingress_reconciliation
       type: script
