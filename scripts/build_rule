@@ -2,16 +2,18 @@
 
 set -euo pipefail
 
-INGRESS_NAME=$(kubectl get ingress -n "$K8S_NAMESPACE" -l "scope_id=$SCOPE_ID" -o jsonpath="{.items[0].metadata.name}" 2>/dev/null || echo "")
+source "$(dirname "${BASH_SOURCE[0]}")/scope_ingress_lib"
+
+INGRESSES=$(kubectl get ingress -n "$K8S_NAMESPACE" -l "scope_id=$SCOPE_ID" -o json 2>/dev/null || echo '{"items": []}')
+INGRESS=$(scope_main_ingress "$SCOPE_ID" <<<"$INGRESSES")
 
 # Check if ingress exists
-if [ -z "$INGRESS_NAME" ]; then
+if [ -z "$INGRESS" ]; then
     echo "There is no ingress for scope $SCOPE_ID. Publishing the rule with an empty backend"
 
     SCOPE_RULE='{"blue_green_annotation": null, "service": {"name": "response-404", "port": { "name": "use-annotation"} }}'
 else
-    echo "Found ingress for scope $SCOPE_ID. Publishing the backend service configuration"
-    INGRESS=$(kubectl get ingress -n "$K8S_NAMESPACE" "$INGRESS_NAME" -o json)
+    echo "Found ingress $(echo "$INGRESS" | jq -r .metadata.name) for scope $SCOPE_ID. Publishing the backend service configuration"
 
     SCOPE_RULE=$(echo "$INGRESS" | jq '{
         blue_green_annotation: .metadata.annotations["alb.ingress.kubernetes.io/actions.bg-deployment"],

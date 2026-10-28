@@ -242,7 +242,10 @@ if [ "$ALB_RECONCILIATION_ENABLED" = "true" ]; then
 fi
 
 ALB_CONDITION_VALUES_JQ='def condition_values(field): [.Conditions[]? | select(.Field == field) | ((.Values // []) + (.HostHeaderConfig.Values // []) + (.PathPatternConfig.Values // []))[]];'
-ALB_RULE_WEIGHTS_JQ='[.Actions[]? | select(.Type == "forward") | (.ForwardConfig.TargetGroups // [select(.TargetGroupArn)])[] | .Weight // 1]'
+ALB_RULE_TARGET_GROUPS_JQ='[.Actions[]? | select(.Type == "forward") | (.ForwardConfig.TargetGroups // [select(.TargetGroupArn)])[]]'
+ALB_RULE_WEIGHTS_JQ="$ALB_RULE_TARGET_GROUPS_JQ | map(.Weight // 1)"
+ALB_RULE_LABEL_JQ='def extra_fields: [.Conditions[]?.Field | select(. != "host-header" and . != "path-pattern")] | unique;
+    def rule_label: "\(.ListenerPort):\(.Priority)" + (extra_fields | if length > 0 then " (\(join(", ")))" else "" end);'
 
 path_patterns() {
     local base="$1"
@@ -259,12 +262,69 @@ path_patterns() {
 alb_rules_for_path() {
     jq -c --arg domain "$EXPOSER_DOMAIN" --argjson patterns "$(path_patterns "$2")" "$ALB_CONDITION_VALUES_JQ"'
         map(select((condition_values("host-header") | index($domain)) != null
-            and any(condition_values("path-pattern")[]; IN($patterns[]))
-            and all(.Actions[]?; .Type != "redirect")))' <<< "$1"
+            and any(condition_values("path-pattern")[]; IN($patterns[]))))' <<< "$1"
+}
+
+# Per listener and path pattern, only the lowest numeric priority among host and path rules is served; a winning redirect skips that listener.
+select_winning_rules() {
+    jq -c --argjson patterns "$(path_patterns "$2")" "$ALB_CONDITION_VALUES_JQ $ALB_RULE_LABEL_JQ"'
+        def redirect: any(.Actions[]?; .Type == "redirect");
+        . as $rules
+        | [$patterns[] as $pattern | {pattern: $pattern, winners: ($rules
+            | map(select((extra_fields | length) == 0 and (.Priority | test("^[0-9]+$")) and (condition_values("path-pattern") | index($pattern)) != null))
+            | group_by(.ListenerArn) | map(min_by(.Priority | tonumber)))}] as $by_pattern
+        | [$by_pattern[].winners[] | select(redirect | not) | .RuleArn] as $checked
+        | [$by_pattern[].winners[].RuleArn] as $winners
+        | {
+            rules: map(select(.RuleArn | IN($checked[]))),
+            missing: [$by_pattern[] | select(all(.winners[]; redirect)) | .pattern],
+            others: [.[] | select(.RuleArn | IN($winners[]) | not) | rule_label]
+        }' <<< "$1"
+}
+
+rule_target_group_arns() {
+    jq -r ".[] | $ALB_RULE_TARGET_GROUPS_JQ | .[].TargetGroupArn" <<< "$1"
+}
+
+# Prints the target groups the controller created for this ingress, tagged ingress.k8s.aws/resource=<namespace>/<ingress>-<service>:<port>.
+exposer_target_groups() {
+    local arns=() arn tags owned="" i
+    while IFS= read -r arn; do
+        arns+=("$arn")
+    done < <(printf '%s\n' "$@" | sort -u | sed '/^$/d')
+    for ((i = 0; i < ${#arns[@]}; i += 20)); do
+        if ! tags=$(aws elbv2 describe-tags \
+                --resource-arns "${arns[@]:i:20}" \
+                --region "$AWS_REGION_EFFECTIVE" \
+                --output json 2>&1); then
+            echo "✗ Could not read target group tags to identify the rules of ingress [$INGRESS_NAME]"
+            echo "  $tags"
+            return 1
+        fi
+        if ! owned+=$(jq -r --arg prefix "$K8S_NAMESPACE/$INGRESS_NAME-" '.TagDescriptions[]
+                | select(any(.Tags[]?; .Key == "ingress.k8s.aws/resource" and (.Value | startswith($prefix)))) | .ResourceArn' <<< "$tags")$'\n'; then
+            echo "✗ Could not parse target group tags"
+            return 1
+        fi
+    done
+    printf '%s' "$owned" | jq -Rsc 'split("\n") | map(select(. != ""))'
+}
+
+exposer_rules() {
+    jq -c --argjson owned "$2" --argjson own "${3:-true}" "map(select(($ALB_RULE_TARGET_GROUPS_JQ) as \$groups
+        | (if (\$groups | length) == 0 then any(.Actions[]?; .Type == \"fixed-response\") else any(\$groups[]; .TargetGroupArn | IN(\$owned[])) end) == \$own))" <<< "$1"
+}
+
+rule_labels() {
+    jq -r "$ALB_RULE_LABEL_JQ"' map(rule_label) | join(", ")' <<< "$1"
 }
 
 domain_has_rules() {
     jq -e --arg domain "$EXPOSER_DOMAIN" "$ALB_CONDITION_VALUES_JQ"' any(.[]; condition_values("host-header") | index($domain) != null)' <<< "$1" >/dev/null
+}
+
+domain_rules() {
+    jq -c --arg domain "$EXPOSER_DOMAIN" "$ALB_CONDITION_VALUES_JQ"' map(select(condition_values("host-header") | index($domain) != null))' <<< "$1"
 }
 
 rule_count() {
@@ -321,14 +381,16 @@ check_fixed_response() {
 }
 
 check_path() {
-    local kind="$1" detail="$2" rules="$3"
-    if [ "$kind" = "absent" ]; then
-        check_absent "$rules"
-        return
-    fi
-
+    local kind="$1" detail="$2" selection="$3" rules missing
+    rules=$(jq -c '.rules' <<< "$selection")
+    missing=$(jq -r '.missing | join(", ")' <<< "$selection")
     if [ "$(rule_count "$rules")" -eq 0 ]; then
         echo "missing rule"
+        return 1
+    fi
+
+    if [ -n "$missing" ]; then
+        echo "missing rule for $missing"
         return 1
     fi
 
@@ -341,7 +403,7 @@ check_path() {
 }
 
 validate_alb_config() {
-    local listeners listener_arns listener_arn rules all_rules i path detail report="" all_ok=true
+    local listeners listener_ports listener_arn listener_port arn rules all_rules i path detail selection others owned="[]" absent_arns=() report="" all_ok=true
 
     if ! listeners=$(aws elbv2 describe-listeners \
             --load-balancer-arn "$ALB_ARN" \
@@ -352,13 +414,13 @@ validate_alb_config() {
         return 1
     fi
 
-    if ! listener_arns=$(jq -r '.Listeners[].ListenerArn' <<< "$listeners"); then
+    if ! listener_ports=$(jq -r '.Listeners[] | "\(.ListenerArn) \(.Port)"' <<< "$listeners"); then
         echo "✗ Could not parse listeners for ALB [$ALB_NAME]"
         return 1
     fi
 
     all_rules="[]"
-    for listener_arn in $listener_arns; do
+    while read -r listener_arn listener_port; do
         if ! rules=$(aws elbv2 describe-rules \
                 --listener-arn "$listener_arn" \
                 --region "$AWS_REGION_EFFECTIVE" \
@@ -368,16 +430,29 @@ validate_alb_config() {
             return 1
         fi
 
-        if ! all_rules=$(echo "$all_rules" "$rules" | jq -sc '.[0] + .[1].Rules'); then
+        if ! all_rules=$(echo "$all_rules" "$rules" | jq -sc --arg listener "$listener_arn" --arg port "$listener_port" '.[0] + (.[1].Rules | map(. + {ListenerArn: $listener, ListenerPort: $port}))'); then
             echo "✗ Could not parse rules for listener [$listener_arn]"
             return 1
         fi
-    done
+    done <<< "$listener_ports"
 
     echo "Checking domain: $EXPOSER_DOMAIN"
 
     if [ -z "$INGRESS_JSON" ]; then
-        if ! domain_has_rules "$all_rules"; then
+        rules=$(domain_rules "$all_rules")
+        absent_arns=()
+        while IFS= read -r arn; do
+            absent_arns+=("$arn")
+        done < <(rule_target_group_arns "$rules")
+        if [ "${#absent_arns[@]}" -gt 0 ] && ! owned=$(exposer_target_groups "${absent_arns[@]}"); then
+            echo "$owned"
+            return 1
+        fi
+        others=$(rule_labels "$(exposer_rules "$rules" "$owned" false)")
+        if [ -n "$others" ]; then
+            echo "  ⚠ Domain also matched by rules $others of other ingresses, only this ingress's rules must be removed"
+        fi
+        if [ "$(rule_count "$(exposer_rules "$rules" "$owned")")" -eq 0 ]; then
             echo "✓ No rules for the domain are left in ALB"
             return 0
         fi
@@ -397,17 +472,58 @@ validate_alb_config() {
     fi
 
     for i in "${!EXPECTED_PATH_LIST[@]}"; do
+        if [ "${EXPECTED_KINDS[$i]}" = "absent" ]; then
+            if ! rules=$(alb_rules_for_path "$all_rules" "${EXPECTED_PATH_LIST[$i]}"); then
+                echo "✗ Could not evaluate ALB rules"
+                return 1
+            fi
+            while IFS= read -r arn; do
+                absent_arns+=("$arn")
+            done < <(rule_target_group_arns "$rules")
+        fi
+    done
+
+    if [ "${#absent_arns[@]}" -gt 0 ] && ! owned=$(exposer_target_groups "${absent_arns[@]}"); then
+        echo "$owned"
+        return 1
+    fi
+
+    for i in "${!EXPECTED_PATH_LIST[@]}"; do
         path="${EXPECTED_PATH_LIST[$i]}"
         if ! rules=$(alb_rules_for_path "$all_rules" "$path"); then
             echo "✗ Could not evaluate ALB rules"
             return 1
         fi
 
-        if detail=$(check_path "${EXPECTED_KINDS[$i]}" "${EXPECTED_DETAILS[$i]}" "$rules"); then
+        if [ "${EXPECTED_KINDS[$i]}" = "absent" ]; then
+            if detail=$(check_absent "$(exposer_rules "$rules" "$owned")"); then
+                report+="  ✓ $path: $detail"$'\n'
+            else
+                report+="  ✗ $path: $detail"$'\n'
+                all_ok=false
+            fi
+            others=$(rule_labels "$(exposer_rules "$rules" "$owned" false)")
+            if [ -n "$others" ]; then
+                report+="  ⚠ $path: also matched by rules $others of other ingresses, only this ingress's rules must be removed"$'\n'
+            fi
+            continue
+        fi
+
+        if ! selection=$(select_winning_rules "$rules" "$path"); then
+            echo "✗ Could not evaluate ALB rules"
+            return 1
+        fi
+
+        if detail=$(check_path "${EXPECTED_KINDS[$i]}" "${EXPECTED_DETAILS[$i]}" "$selection"); then
             report+="  ✓ $path: $detail"$'\n'
         else
             report+="  ✗ $path: $detail"$'\n'
             all_ok=false
+        fi
+
+        others=$(jq -r '.others | join(", ")' <<< "$selection")
+        if [ -n "$others" ]; then
+            report+="  ⚠ $path: also matched by rules $others, only the lowest priority per listener and path pattern is checked"$'\n'
         fi
     done
 

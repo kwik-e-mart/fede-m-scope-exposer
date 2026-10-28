@@ -8,6 +8,11 @@ if ! source "$(dirname "${BASH_SOURCE[0]}")/lease_lib"; then
   exit 1
 fi
 
+if ! source "$(dirname "${BASH_SOURCE[0]}")/scope_ingress_lib"; then
+  echo "Error: could not load scope_ingress_lib from $(dirname "${BASH_SOURCE[0]}")"
+  exit 1
+fi
+
 if ! source "$(dirname "${BASH_SOURCE[0]}")/validate_references_lib"; then
   echo "Error: could not load validate_references_lib from $(dirname "${BASH_SOURCE[0]}")"
   exit 1
@@ -59,20 +64,21 @@ rebuild_ingress_scope_slug() {
 }
 
 rebuild_ingress_scope_backend() {
-  local scope_id="$1" ingresses
+  local scope_id="$1" ingresses ingress
   if ! ingresses=$(kubectl get ingress -n "$K8S_NAMESPACE" -l "scope_id=$scope_id" -o json); then
     echo "Error: could not read the ingresses of scope $scope_id" >&2
     return 1
   fi
-  if [[ "$(jq '.items | length' <<<"$ingresses")" == "0" ]]; then
+  ingress=$(scope_main_ingress "$scope_id" <<<"$ingresses")
+  if [[ -z "$ingress" ]]; then
     echo "There is no ingress for scope $scope_id. Publishing its paths with response-404" >&2
     echo "$REBUILD_INGRESS_404_BACKEND"
     return 0
   fi
-  jq -c '.items[0] | {
+  jq -c '{
     annotation: .metadata.annotations["alb.ingress.kubernetes.io/actions.bg-deployment"],
     service: .spec.rules[0].http.paths[0].backend.service
-  }' <<<"$ingresses"
+  }' <<<"$ingress"
 }
 
 rebuild_ingress_link_rule() {

@@ -1,19 +1,24 @@
 #!/bin/bash
 
 INGRESS_SERVICE_REFS_JQ='
+def lower_keys:
+  if type == "object" then with_entries(.key |= ascii_downcase | .value |= lower_keys)
+  elif type == "array" then map(lower_keys)
+  else . end;
+
 def action_refs($ingress; $name):
   "alb.ingress.kubernetes.io/actions.\($name)" as $key
   | ($ingress.metadata.annotations // {})[$key] as $raw
   | if $raw == null then
       error("ingress \($ingress.metadata.name): annotation \($key) does not exist")
     else
-      (try ($raw | fromjson) catch error("ingress \($ingress.metadata.name): annotation \($key) is not valid JSON")) as $action
+      (try ($raw | fromjson | lower_keys) catch error("ingress \($ingress.metadata.name): annotation \($key) is not valid JSON")) as $action
       | if ($action | type) != "object" then
           error("ingress \($ingress.metadata.name): annotation \($key) is not an action object")
         elif $action.type == "forward" then
-          (($action.forwardConfig.targetGroups // []) + ($action.targetGroups // []))[]
-          | select(.serviceName != null)
-          | {service: .serviceName, port: (.servicePort // "-" | tostring)}
+          (($action.forwardconfig.targetgroups // []) + ($action.targetgroups // []))[]
+          | select(.servicename != null)
+          | {service: .servicename, port: (.serviceport // "-" | tostring)}
         elif $action.type == "fixed-response" or $action.type == "redirect" then
           empty
         else
