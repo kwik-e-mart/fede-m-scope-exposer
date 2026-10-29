@@ -18,6 +18,7 @@ RECONCILIATION_EXPECTATION="${RECONCILIATION_EXPECTATION-present}"
 VERIFY_SCOPE="${VERIFY_SCOPE-link}"
 REMOVED_PATHS="${REMOVED_PATHS:-[]}"
 elapsed=0
+WAIT_STARTED=$(date -u +%s) || WAIT_STARTED=""
 
 case "$RECONCILIATION_EXPECTATION" in
     present|absent) ;;
@@ -325,7 +326,7 @@ exposer_rules() {
 warn_tags_denied() {
     if [ "$1" = "null" ] && [ -z "${TAGS_DENIED_WARNED:-}" ]; then
         TAGS_DENIED_WARNED=true
-        echo "⚠ Missing elasticloadbalancing:DescribeTags permission: rule ownership cannot be checked, so every rule matching a removed path counts as this ingress's"
+        echo "⚠ Missing elasticloadbalancing:DescribeTags permission: rule ownership cannot be checked; rules on removed paths all count as this ingress's and winners of other ingresses are not detected"
     fi
 }
 
@@ -423,6 +424,12 @@ winner_lines() {
         | "    - \(map(.pattern) | join(", ")): won by \(.[0].won)"' <<< "$1"
 }
 
+foreign_winner_lines() {
+    jq -r --arg path "$1" --argjson owned "$3" "$ALB_RULE_OWNED_JQ $ALB_RULE_LABEL_JQ"'
+        map({pattern, won: (.rules | map(select(owned_by($owned) | not) | rule_label) | join(", "))} | select(.won != "")) | group_by(.won)[]
+        | "  ⚠ \($path): won by \(.[0].won) (another ingress) for \(map(.pattern) | join(", ")), traffic for it does not reach this ingress"' <<< "$2"
+}
+
 check_path() {
     local kind="$1" detail="$2" selection="$3" rules missing
     rules=$(jq -c '.rules' <<< "$selection")
@@ -440,8 +447,19 @@ check_path() {
     check_kind "$kind" "$detail" "$rules"
 }
 
+# Counts real time, API calls included, but never less than the sleeps; without a valid clock it counts the sleeps only.
+advance_elapsed() {
+    local now
+    if [[ "$WAIT_STARTED" =~ ^[0-9]+$ ]] && now=$(date -u +%s) && [[ "$now" =~ ^[0-9]+$ ]] \
+            && (( now - WAIT_STARTED > elapsed + CHECK_INTERVAL )); then
+        elapsed=$((now - WAIT_STARTED))
+    else
+        elapsed=$((elapsed + CHECK_INTERVAL))
+    fi
+}
+
 validate_alb_config() {
-    local listeners listener_ports listener_arn listener_port arn rules all_rules i path detail selection others failing winners_owned winner_arns owned="[]" absent_arns=() report="" all_ok=true
+    local listeners listener_ports listener_arn listener_port arn rules all_rules i path detail selection others winners lines fetched winners_owned="[]" owned="[]" absent_arns=() winner_arns=() new_arns=() passing_arns=0 selections=() details=() passed=() path_winners=() report="" all_ok=true
 
     if ! listeners=$(aws elbv2 describe-listeners \
             --load-balancer-arn "$ALB_ARN" \
@@ -529,13 +547,67 @@ validate_alb_config() {
     warn_tags_denied "$owned"
 
     for i in "${!EXPECTED_PATH_LIST[@]}"; do
+        if [ "${EXPECTED_KINDS[$i]}" = "absent" ]; then
+            continue
+        fi
         path="${EXPECTED_PATH_LIST[$i]}"
-        if ! rules=$(alb_rules_for_path "$all_rules" "$path"); then
+        if ! rules=$(alb_rules_for_path "$all_rules" "$path") || ! selection=$(select_winning_rules "$rules" "$path"); then
             echo "✗ Could not evaluate ALB rules"
             return 1
         fi
+        selections[$i]=$selection
+
+        if detail=$(check_path "${EXPECTED_KINDS[$i]}" "${EXPECTED_DETAILS[$i]}" "$selection"); then
+            passed[$i]=true
+            winners=$(jq -c '.patterns' <<< "$selection")
+        else
+            passed[$i]=false
+            winners=$(failing_patterns "${EXPECTED_KINDS[$i]}" "${EXPECTED_DETAILS[$i]}" "$selection")
+        fi
+        details[$i]=$detail
+        path_winners[$i]=$winners
+
+        while IFS= read -r arn; do
+            winner_arns+=("$arn")
+            if [ "${passed[$i]}" = "true" ]; then
+                passing_arns=$((passing_arns + 1))
+            fi
+        done < <(jq -r ".[].rules[] | $ALB_RULE_TARGET_GROUPS_JQ | .[].TargetGroupArn" <<< "$winners")
+    done
+
+    # One describe-tags call for the winners of present paths; reading their ownership never fails the step.
+    if [ "${#winner_arns[@]}" -gt 0 ]; then
+        if [ "$owned" = "null" ]; then
+            winners_owned=null
+        else
+            while IFS= read -r arn; do
+                new_arns+=("$arn")
+            done < <(printf '%s\n' "${winner_arns[@]}" | grep -vxF -f <(printf '%s\n' ${absent_arns[@]+"${absent_arns[@]}"}))
+            if [ "${#new_arns[@]}" -eq 0 ]; then
+                winners_owned="$owned"
+            elif ! fetched=$(exposer_target_groups "${new_arns[@]}"); then
+                winners_owned='"unreadable"'
+                if [ "$passing_arns" -gt 0 ]; then
+                    echo "⚠ Could not read target group tags, so winners of other ingresses are not detected"
+                    sed 1d <<< "$fetched"
+                fi
+            elif [ "$fetched" = "null" ]; then
+                winners_owned=null
+            else
+                winners_owned=$(jq -c --argjson fetched "$fetched" '. + $fetched' <<< "$owned")
+            fi
+        fi
+    fi
+    warn_tags_denied "$winners_owned"
+
+    for i in "${!EXPECTED_PATH_LIST[@]}"; do
+        path="${EXPECTED_PATH_LIST[$i]}"
 
         if [ "${EXPECTED_KINDS[$i]}" = "absent" ]; then
+            if ! rules=$(alb_rules_for_path "$all_rules" "$path"); then
+                echo "✗ Could not evaluate ALB rules"
+                return 1
+            fi
             if detail=$(check_absent "$(exposer_rules "$rules" "$owned")"); then
                 report+="  ✓ $path: $detail"$'\n'
             else
@@ -549,29 +621,21 @@ validate_alb_config() {
             continue
         fi
 
-        if ! selection=$(select_winning_rules "$rules" "$path"); then
-            echo "✗ Could not evaluate ALB rules"
-            return 1
-        fi
-
-        if detail=$(check_path "${EXPECTED_KINDS[$i]}" "${EXPECTED_DETAILS[$i]}" "$selection"); then
-            report+="  ✓ $path: $detail"$'\n'
-        else
-            report+="  ✗ $path: $detail"$'\n'
-            all_ok=false
-            failing=$(failing_patterns "${EXPECTED_KINDS[$i]}" "${EXPECTED_DETAILS[$i]}" "$selection")
-            if [ "$(rule_count "$failing")" -gt 0 ]; then
-                winner_arns=()
-                while IFS= read -r arn; do
-                    winner_arns+=("$arn")
-                done < <(jq -r ".[].rules[] | $ALB_RULE_TARGET_GROUPS_JQ | .[].TargetGroupArn" <<< "$failing")
-                if [ "${#winner_arns[@]}" -eq 0 ]; then
-                    winners_owned="[]"
-                elif ! winners_owned=$(exposer_target_groups "${winner_arns[@]}"); then
-                    winners_owned='"unreadable"'
+        selection="${selections[$i]}"
+        winners="${path_winners[$i]}"
+        if [ "${passed[$i]}" = "true" ]; then
+            report+="  ✓ $path: ${details[$i]}"$'\n'
+            if jq -e 'type == "array"' <<< "$winners_owned" >/dev/null; then
+                lines=$(foreign_winner_lines "$path" "$winners" "$winners_owned")
+                if [ -n "$lines" ]; then
+                    report+="$lines"$'\n'
                 fi
-                warn_tags_denied "$winners_owned"
-                report+=$(winner_lines "$failing" "$winners_owned")$'\n'
+            fi
+        else
+            report+="  ✗ $path: ${details[$i]}"$'\n'
+            all_ok=false
+            if [ "$(rule_count "$winners")" -gt 0 ]; then
+                report+=$(winner_lines "$winners" "$winners_owned")$'\n'
             fi
         fi
 
@@ -630,7 +694,7 @@ if [ -z "$INGRESS_JSON" ]; then
 
         echo "Waiting for ALB reconciliation... (${elapsed}s/${MAX_WAIT_SECONDS}s)"
         sleep "$CHECK_INTERVAL"
-        elapsed=$((elapsed + CHECK_INTERVAL))
+        advance_elapsed
     done
 
     echo "✗ Timeout waiting for the ALB to drop the rules of domain [$EXPOSER_DOMAIN] after ${MAX_WAIT_SECONDS} seconds"
@@ -722,7 +786,7 @@ while [ "$elapsed" -lt "$MAX_WAIT_SECONDS" ]; do
         echo "Waiting for the ingress reconciliation event... (${elapsed}s/${MAX_WAIT_SECONDS}s)"
     fi
     sleep "$CHECK_INTERVAL"
-    elapsed=$((elapsed + CHECK_INTERVAL))
+    advance_elapsed
 done
 
 # Timeout reached - show diagnostic information
