@@ -1,15 +1,16 @@
 #!/bin/bash
 
 scope_main_ingress() {
-  local scope_id="$1" ingresses main
+  local scope_id="$1" ingresses count main
   ingresses=$(jq -c '.items // []')
-  if [[ "$(jq 'length' <<<"$ingresses")" == "0" ]]; then
+  count=$(jq 'length' <<<"$ingresses")
+  if [[ "$count" == "0" ]]; then
     return 0
   fi
   main=$(jq -c --arg scope "$scope_id" 'map(select(.metadata.name | test("-\($scope)-(internet-facing|internal)$")))[0] // empty' <<<"$ingresses")
   if [[ -z "$main" ]]; then
     main=$(jq -c '.[0]' <<<"$ingresses")
-    echo "⚠ No ingress of scope $scope_id is named k-8-s-<scope>-$scope_id-<visibility>; using $(jq -r '.metadata.name' <<<"$main")" >&2
+    [[ "$count" == "1" ]] || echo "⚠ No ingress of scope $scope_id is named k-8-s-<scope>-$scope_id-<visibility>; using $(jq -r '.metadata.name' <<<"$main")" >&2
   fi
   echo "$main"
 }

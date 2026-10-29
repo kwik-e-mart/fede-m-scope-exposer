@@ -244,6 +244,8 @@ fi
 ALB_CONDITION_VALUES_JQ='def condition_values(field): [.Conditions[]? | select(.Field == field) | ((.Values // []) + (.HostHeaderConfig.Values // []) + (.PathPatternConfig.Values // []))[]];'
 ALB_RULE_TARGET_GROUPS_JQ='[.Actions[]? | select(.Type == "forward") | (.ForwardConfig.TargetGroups // [select(.TargetGroupArn)])[]]'
 ALB_RULE_WEIGHTS_JQ="$ALB_RULE_TARGET_GROUPS_JQ | map(.Weight // 1)"
+ALB_RULE_OWNED_JQ="def owned_by(\$owned): ($ALB_RULE_TARGET_GROUPS_JQ) as \$groups
+    | if (\$groups | length) == 0 then any(.Actions[]?; .Type == \"fixed-response\") else any(\$groups[]; .TargetGroupArn | IN(\$owned[])) end;"
 ALB_RULE_LABEL_JQ='def extra_fields: [.Conditions[]?.Field | select(. != "host-header" and . != "path-pattern")] | unique;
     def rule_label: "\(.ListenerPort):\(.Priority)" + (extra_fields | if length > 0 then " (\(join(", ")))" else "" end);'
 
@@ -278,7 +280,8 @@ select_winning_rules() {
         | {
             rules: map(select(.RuleArn | IN($checked[]))),
             missing: [$by_pattern[] | select(all(.winners[]; redirect)) | .pattern],
-            others: [.[] | select(.RuleArn | IN($winners[]) | not) | rule_label]
+            others: [.[] | select(.RuleArn | IN($winners[]) | not) | rule_label],
+            patterns: [$by_pattern[] | {pattern, rules: [.winners[] | select(redirect | not)]}]
         }' <<< "$1"
 }
 
@@ -287,6 +290,7 @@ rule_target_group_arns() {
 }
 
 # Prints the target groups the controller created for this ingress, tagged ingress.k8s.aws/resource=<namespace>/<ingress>-<service>:<port>.
+# Prints null when DescribeTags is denied, so every rule counts as the exposer's.
 exposer_target_groups() {
     local arns=() arn tags owned="" i
     while IFS= read -r arn; do
@@ -297,6 +301,10 @@ exposer_target_groups() {
                 --resource-arns "${arns[@]:i:20}" \
                 --region "$AWS_REGION_EFFECTIVE" \
                 --output json 2>&1); then
+            if grep -qE 'AccessDenied|not authorized to perform' <<< "$tags"; then
+                echo null
+                return 0
+            fi
             echo "✗ Could not read target group tags to identify the rules of ingress [$INGRESS_NAME]"
             echo "  $tags"
             return 1
@@ -311,8 +319,14 @@ exposer_target_groups() {
 }
 
 exposer_rules() {
-    jq -c --argjson owned "$2" --argjson own "${3:-true}" "map(select(($ALB_RULE_TARGET_GROUPS_JQ) as \$groups
-        | (if (\$groups | length) == 0 then any(.Actions[]?; .Type == \"fixed-response\") else any(\$groups[]; .TargetGroupArn | IN(\$owned[])) end) == \$own))" <<< "$1"
+    jq -c --argjson owned "$2" --argjson own "${3:-true}" "$ALB_RULE_OWNED_JQ"' map(select(($owned == null or owned_by($owned)) == $own))' <<< "$1"
+}
+
+warn_tags_denied() {
+    if [ "$1" = "null" ] && [ -z "${TAGS_DENIED_WARNED:-}" ]; then
+        TAGS_DENIED_WARNED=true
+        echo "⚠ Missing elasticloadbalancing:DescribeTags permission: rule ownership cannot be checked, so every rule matching a removed path counts as this ingress's"
+    fi
 }
 
 rule_labels() {
@@ -380,6 +394,35 @@ check_fixed_response() {
     return 1
 }
 
+check_kind() {
+    case "$1" in
+        single) check_single "$3" ;;
+        weights) check_weights "$2" "$3" ;;
+        fixed-response) check_fixed_response "$2" "$3" ;;
+        *) echo "rule present" ;;
+    esac
+}
+
+failing_patterns() {
+    local kind="$1" detail="$2" selection="$3" pattern rules failing="[]"
+    while IFS= read -r pattern; do
+        rules=$(jq -c --arg pattern "$pattern" '.patterns[] | select(.pattern == $pattern) | .rules' <<< "$selection")
+        if [ "$(rule_count "$rules")" -gt 0 ] && ! check_kind "$kind" "$detail" "$rules" >/dev/null; then
+            failing=$(jq -c --arg pattern "$pattern" --argjson rules "$rules" '. + [{pattern: $pattern, rules: $rules}]' <<< "$failing")
+        fi
+    done < <(jq -r '.patterns[].pattern' <<< "$selection")
+    echo "$failing"
+}
+
+winner_lines() {
+    jq -r --argjson owned "$2" "$ALB_RULE_OWNED_JQ $ALB_RULE_LABEL_JQ"'
+        def owner: if $owned == null then "ingress unknown, no DescribeTags permission"
+            elif ($owned | type) != "array" then "ingress unknown"
+            elif owned_by($owned) then "this ingress" else "another ingress" end;
+        map({pattern, won: (.rules | map("\(rule_label) (\(owner))") | join(", "))}) | group_by(.won)[]
+        | "    - \(map(.pattern) | join(", ")): won by \(.[0].won)"' <<< "$1"
+}
+
 check_path() {
     local kind="$1" detail="$2" selection="$3" rules missing
     rules=$(jq -c '.rules' <<< "$selection")
@@ -394,16 +437,11 @@ check_path() {
         return 1
     fi
 
-    case "$kind" in
-        single) check_single "$rules" ;;
-        weights) check_weights "$detail" "$rules" ;;
-        fixed-response) check_fixed_response "$detail" "$rules" ;;
-        *) echo "rule present" ;;
-    esac
+    check_kind "$kind" "$detail" "$rules"
 }
 
 validate_alb_config() {
-    local listeners listener_ports listener_arn listener_port arn rules all_rules i path detail selection others owned="[]" absent_arns=() report="" all_ok=true
+    local listeners listener_ports listener_arn listener_port arn rules all_rules i path detail selection others failing winners_owned winner_arns owned="[]" absent_arns=() report="" all_ok=true
 
     if ! listeners=$(aws elbv2 describe-listeners \
             --load-balancer-arn "$ALB_ARN" \
@@ -448,6 +486,7 @@ validate_alb_config() {
             echo "$owned"
             return 1
         fi
+        warn_tags_denied "$owned"
         others=$(rule_labels "$(exposer_rules "$rules" "$owned" false)")
         if [ -n "$others" ]; then
             echo "  ⚠ Domain also matched by rules $others of other ingresses, only this ingress's rules must be removed"
@@ -487,6 +526,7 @@ validate_alb_config() {
         echo "$owned"
         return 1
     fi
+    warn_tags_denied "$owned"
 
     for i in "${!EXPECTED_PATH_LIST[@]}"; do
         path="${EXPECTED_PATH_LIST[$i]}"
@@ -519,6 +559,20 @@ validate_alb_config() {
         else
             report+="  ✗ $path: $detail"$'\n'
             all_ok=false
+            failing=$(failing_patterns "${EXPECTED_KINDS[$i]}" "${EXPECTED_DETAILS[$i]}" "$selection")
+            if [ "$(rule_count "$failing")" -gt 0 ]; then
+                winner_arns=()
+                while IFS= read -r arn; do
+                    winner_arns+=("$arn")
+                done < <(jq -r ".[].rules[] | $ALB_RULE_TARGET_GROUPS_JQ | .[].TargetGroupArn" <<< "$failing")
+                if [ "${#winner_arns[@]}" -eq 0 ]; then
+                    winners_owned="[]"
+                elif ! winners_owned=$(exposer_target_groups "${winner_arns[@]}"); then
+                    winners_owned='"unreadable"'
+                fi
+                warn_tags_denied "$winners_owned"
+                report+=$(winner_lines "$failing" "$winners_owned")$'\n'
+            fi
         fi
 
         others=$(jq -r '.others | join(", ")' <<< "$selection")
