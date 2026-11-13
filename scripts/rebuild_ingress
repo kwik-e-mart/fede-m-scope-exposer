@@ -82,10 +82,19 @@ rebuild_ingress_link_rule() {
     | {paths: [$paths[] as $path | {path: $path, pathType: "Prefix", backend: {service: .service}}], annotations}'
 }
 
-rebuild_ingress_registered_paths() {
-  jq -c --arg scope "$1" --argjson paths "$2" '
-    [(.service.attributes.rules // [])[] | select(.scope == $scope) | .path] as $registered
-    | $paths | map(select(. as $path | $registered | index($path) != null))' <<<"$CONTEXT"
+rebuild_ingress_service_rules() {
+  local service
+  if ! service=$(np service read --id "$SERVICE_ID" --format json) || ! jq -ce '.attributes.rules // [] | arrays' <<<"$service" 2>/dev/null; then
+    echo "Error: could not read the rules of service $SERVICE_ID: $service" >&2
+    return 1
+  fi
+}
+
+rebuild_ingress_failed_paths() {
+  jq -c --arg scope "$1" --argjson paths "$2" --argjson declared "$3" '
+    [.[] | select(.scope == $scope) | .path] as $registered
+    | {published: ($paths | map(select(. as $path | $registered | index($path) != null))),
+       orphan: ($registered - $declared | unique)}' <<<"$4"
 }
 
 rebuild_ingress_alb_mismatch() {
@@ -118,7 +127,7 @@ rebuild_ingress_build() {
 }
 
 rebuild_ingress_main() {
-  local links id slug status nrn paths published scope_id scope_slug backend rule selected="" owners="" duplicates
+  local links id slug status nrn paths published orphan failed="" declared="" service_rules="" scope_id scope_slug backend rule selected="" owners="" duplicates
   local ingress_name live base mismatch verb=replace resource_version="" rules="" registry="" report="" ingress file rc=0
   local scope_pattern='(^|:)scope=([0-9]+)(:|$)'
 
@@ -142,26 +151,12 @@ rebuild_ingress_main() {
       return 1
     fi
     scope_id="${BASH_REMATCH[2]}"
+    declared+="$paths"$'\n'
     if [[ "$status" == "failed" ]]; then
-      if ! scope_slug=$(rebuild_ingress_scope_slug "$scope_id"); then
-        echo "The ingress was not changed; retry once the cause above is fixed."
-        return 1
-      fi
-      published=$(rebuild_ingress_registered_paths "$scope_slug" "$paths")
-      if [[ "$published" == "[]" ]]; then
-        echo "⚠ Link $slug is failed and none of its paths $paths is in the service rules; it is not published"
-        report+="  - $slug: status failed, paths $paths not published"$'\n'
-        continue
-      fi
-      if [[ "$published" != "$paths" ]]; then
-        echo "⚠ Link $slug is failed; only its paths in the service rules are kept: $published of $paths"
-        report+="  - $slug: status failed, paths $published kept of $paths"$'\n'
-        paths="$published"
-      else
-        echo "⚠ Link $slug is failed; its paths are in the service rules and are kept"
-        report+="  - $slug: status failed, paths $paths kept"$'\n'
-      fi
-    elif [[ "$status" != "active" ]]; then
+      failed+="$slug"$'\t'"$scope_id"$'\t'"$paths"$'\n'
+      continue
+    fi
+    if [[ "$status" != "active" ]]; then
       echo "⚠ Link $slug is $status; its paths are kept"
       report+="  - $slug: status $status, paths $paths kept"$'\n'
     fi
@@ -172,6 +167,45 @@ rebuild_ingress_main() {
     selected+="$slug"$'\t'"$scope_id"$'\t'"$paths"$'\n'
     owners+=$(jq -r --arg slug "$slug" '.[] | "\(.)\t\($slug)"' <<<"$paths")$'\n'
   done 3<<<"$links"
+
+  while IFS=$'\t' read -r -u 3 slug scope_id paths; do
+    if [[ -z "$slug" ]]; then
+      continue
+    fi
+    if [[ -z "$service_rules" ]] && ! service_rules=$(rebuild_ingress_service_rules); then
+      echo "The ingress was not changed; retry once the cause above is fixed."
+      return 1
+    fi
+    if ! scope_slug=$(rebuild_ingress_scope_slug "$scope_id"); then
+      echo "The ingress was not changed; retry once the cause above is fixed."
+      return 1
+    fi
+    if ! published=$(rebuild_ingress_failed_paths "$scope_slug" "$paths" "$(jq -sc 'add // []' <<<"$declared")" "$service_rules"); then
+      echo "Error: could not compare link $slug with the service rules. The ingress was not changed."
+      return 1
+    fi
+    orphan=$(jq -c '.orphan' <<<"$published")
+    published=$(jq -c '.published' <<<"$published")
+    if [[ "$published" != "$paths" && "$orphan" != "[]" ]]; then
+      echo "Error: link $slug is failed and declares $paths, but the service rules register $orphan for its scope $scope_slug and no link declares them. Refresh or update the link, then run rebuild-ingress again. The ingress was not changed."
+      return 1
+    fi
+    if [[ "$published" == "[]" ]]; then
+      echo "⚠ Link $slug is failed and none of its paths $paths is in the service rules; it is not published"
+      report+="  - $slug: status failed, paths $paths not published"$'\n'
+      continue
+    fi
+    if [[ "$published" != "$paths" ]]; then
+      echo "⚠ Link $slug is failed; only its paths in the service rules are kept: $published of $paths"
+      report+="  - $slug: status failed, paths $published kept of $paths"$'\n'
+      paths="$published"
+    else
+      echo "⚠ Link $slug is failed; its paths are in the service rules and are kept"
+      report+="  - $slug: status failed, paths $paths kept"$'\n'
+    fi
+    selected+="$slug"$'\t'"$scope_id"$'\t'"$paths"$'\n'
+    owners+=$(jq -r --arg slug "$slug" '.[] | "\(.)\t\($slug)"' <<<"$paths")$'\n'
+  done 3<<<"$failed"
 
   duplicates=$(printf '%s' "$owners" | rebuild_ingress_duplicate_paths)
   if [[ -n "$duplicates" ]]; then

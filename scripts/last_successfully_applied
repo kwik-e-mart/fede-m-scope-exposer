@@ -104,7 +104,7 @@ last_successfully_applied_save() {
       echo "Error: could not build the last successfully applied snapshot of ingress [$ingress_name]"
       return 1
     fi
-    if ! lease_assert_held 10; then
+    if ! lease_assert_held 10 "The snapshot was not saved, but the ingress and the service rules are already updated; run rebuild-ingress to save a new snapshot (restore-ingress would return to the previous one)."; then
       return 1
     fi
     rc=0

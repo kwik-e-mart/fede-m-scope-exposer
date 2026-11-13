@@ -1,5 +1,7 @@
 #!/bin/bash
 
+LEASE_RESTORE_HINT="Nothing was written; run restore-ingress to return the ingress to the last successfully applied snapshot."
+
 lease_name() {
   echo "exposer-$SERVICE_ID"
 }
@@ -66,16 +68,16 @@ lease_remaining() {
 }
 
 lease_assert_held() {
-  local needed="$1" remaining
+  local needed="$1" hint="${2:-$LEASE_RESTORE_HINT}" remaining
   if ! remaining=$(lease_remaining); then
-    echo "Nothing was written; run restore-ingress to return the ingress to the last successfully applied snapshot."
+    echo "$hint"
     return 1
   fi
   if (( remaining < needed )); then
     if (( remaining < 0 )); then
       remaining=0
     fi
-    echo "Error: the Lease $(lease_name) has ${remaining}s left and this write needs ${needed}s. Nothing was written; run restore-ingress to return the ingress to the last successfully applied snapshot."
+    echo "Error: the Lease $(lease_name) has ${remaining}s left and this write needs ${needed}s. $hint"
     return 1
   fi
 }
@@ -85,7 +87,7 @@ lease_budget() {
   if ! remaining=$(lease_remaining); then
     return 1
   fi
-  remaining=$((remaining - 10))
+  remaining=$((remaining - 30))
   if (( remaining < limit )); then
     limit="$remaining"
   fi
