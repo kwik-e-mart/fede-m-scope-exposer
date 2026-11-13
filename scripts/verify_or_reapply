@@ -1,9 +1,6 @@
 #!/bin/bash
 
-if ! source "$(dirname "${BASH_SOURCE[0]}")/restore_ingress_lib"; then
-  echo "Error: could not load restore_ingress_lib from $(dirname "${BASH_SOURCE[0]}")"
-  exit 1
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/restore_ingress_lib"
 
 VERIFY_OR_REAPPLY_DIR="$(dirname "${BASH_SOURCE[0]}")"
 VERIFY_OR_REAPPLY_SECONDS=40

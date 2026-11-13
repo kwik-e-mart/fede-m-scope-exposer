@@ -1,9 +1,6 @@
 #!/bin/bash
 
-if ! source "$(dirname "${BASH_SOURCE[0]}")/ingress_service_refs"; then
-    echo "✗ Could not load ingress_service_refs"
-    return 1
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/ingress_service_refs"
 
 ALB_NAME=$(echo "$CONTEXT" | jq -r .alb_name)
 EXPOSER_DOMAIN=$(echo "$CONTEXT" | jq -r '.parameters.domain // .service.attributes.domain')
@@ -20,6 +17,19 @@ REMOVED_PATHS="${REMOVED_PATHS:-[]}"
 elapsed=0
 WAIT_STARTED=$(date -u +%s) || WAIT_STARTED=""
 
+fetch_exposer_ingress() {
+    local labeled
+    INGRESS_JSON=$(kubectl get ingress "$INGRESS_NAME" -n "$K8S_NAMESPACE" -o json --ignore-not-found) || return 1
+    if [ -n "$INGRESS_JSON" ]; then
+        return 0
+    fi
+    labeled=$(kubectl get ingress -n "$K8S_NAMESPACE" -l "service_id=$SERVICE_ID" -o json) || return 1
+    INGRESS_JSON=$(jq -c '.items[0] // empty' <<< "${labeled:-null}") || return 1
+    if [ -n "$INGRESS_JSON" ]; then
+        INGRESS_NAME=$(jq -r '.metadata.name' <<< "$INGRESS_JSON")
+    fi
+}
+
 case "$RECONCILIATION_EXPECTATION" in
     present|absent) ;;
     *)
@@ -33,7 +43,7 @@ case "$VERIFY_SCOPE" in
         EXPECTED_PATHS="${RULE_PATHS:-[]}"
         ;;
     all)
-        if ! INGRESS_JSON=$(kubectl get ingress "$INGRESS_NAME" -n "$K8S_NAMESPACE" -o json --ignore-not-found); then
+        if ! fetch_exposer_ingress; then
             echo "✗ Failed to get ingress [$INGRESS_NAME]"
             return 1
         fi
@@ -82,7 +92,7 @@ if [ -z "$AWS_REGION_EFFECTIVE" ]; then
     exit 1
 fi
 
-if [ "$VERIFY_SCOPE" = "link" ] && ! INGRESS_JSON=$(kubectl get ingress "$INGRESS_NAME" -n "$K8S_NAMESPACE" -o json --ignore-not-found); then
+if [ "$VERIFY_SCOPE" = "link" ] && ! fetch_exposer_ingress; then
     echo "✗ Failed to get ingress [$INGRESS_NAME]"
     return 1
 fi
@@ -666,11 +676,22 @@ mentions_link() {
     return 1
 }
 
+certificate_failure_of_exposer() {
+    local message="$1" pattern='no certificate found for host:? *([^[:space:],"]+)'
+    if [[ "$message" != *"no certificate found for host"* ]]; then
+        return 1
+    fi
+    if [[ "$message" == *"$K8S_NAMESPACE/$INGRESS_NAME:"* ]]; then
+        return 0
+    fi
+    [[ "$message" =~ $pattern ]] && [ "${BASH_REMATCH[1]}" = "$EXPOSER_DOMAIN" ]
+}
+
 is_attributable() {
     local reason="$1" message="$2"
     [ "$ALB_RECONCILIATION_ENABLED" != "true" ] \
         || [ "$reason" = "ConflictingIngressClass" ] \
-        || [[ "$message" == *"no certificate found for host"* ]] \
+        || certificate_failure_of_exposer "$message" \
         || mentions_link "$message"
 }
 

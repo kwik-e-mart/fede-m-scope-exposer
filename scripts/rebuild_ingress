@@ -3,20 +3,10 @@
 REBUILD_INGRESS_PAGE_SIZE=200
 REBUILD_INGRESS_404_BACKEND='{"service":{"name":"response-404","port":{"name":"use-annotation"}},"annotation":null}'
 
-if ! source "$(dirname "${BASH_SOURCE[0]}")/lease_lib"; then
-  echo "Error: could not load lease_lib from $(dirname "${BASH_SOURCE[0]}")"
-  exit 1
-fi
-
-if ! source "$(dirname "${BASH_SOURCE[0]}")/scope_ingress_lib"; then
-  echo "Error: could not load scope_ingress_lib from $(dirname "${BASH_SOURCE[0]}")"
-  exit 1
-fi
-
-if ! source "$(dirname "${BASH_SOURCE[0]}")/validate_references_lib"; then
-  echo "Error: could not load validate_references_lib from $(dirname "${BASH_SOURCE[0]}")"
-  exit 1
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/lease_lib"
+source "$(dirname "${BASH_SOURCE[0]}")/last_successfully_applied_lib"
+source "$(dirname "${BASH_SOURCE[0]}")/scope_ingress_lib"
+source "$(dirname "${BASH_SOURCE[0]}")/validate_references_lib"
 
 rebuild_ingress_list_links() {
   local offset=0 page count account_nrn
@@ -92,6 +82,22 @@ rebuild_ingress_link_rule() {
     | {paths: [$paths[] as $path | {path: $path, pathType: "Prefix", backend: {service: .service}}], annotations}'
 }
 
+rebuild_ingress_registered_paths() {
+  jq -c --arg scope "$1" --argjson paths "$2" '
+    [(.service.attributes.rules // [])[] | select(.scope == $scope) | .path] as $registered
+    | $paths | map(select(. as $path | $registered | index($path) != null))' <<<"$CONTEXT"
+}
+
+rebuild_ingress_alb_mismatch() {
+  jq -rn --argjson live "$1" --argjson base "$2" '
+    ["group.name", "load-balancer-name", "scheme"][]
+    | "alb.ingress.kubernetes.io/\(.)" as $key
+    | ($live.metadata.annotations[$key] // "none") as $current
+    | ($base.metadata.annotations[$key] // "none") as $resolved
+    | select($current != $resolved)
+    | "  \($key): live \($current), resolved now \($resolved)"'
+}
+
 rebuild_ingress_render() {
   local context_path="$OUTPUT_DIR/context-$SERVICE_ID.json" rendered rc=0
   jq --arg k8s_namespace "$K8S_NAMESPACE" --arg alb_name "$ALB_NAME" --arg visibility "$VISIBILITY" --arg domain "$SERVICE_DOMAIN" \
@@ -112,8 +118,8 @@ rebuild_ingress_build() {
 }
 
 rebuild_ingress_main() {
-  local links id slug status nrn paths scope_id scope_slug backend rule selected="" owners="" duplicates
-  local ingress_name live base verb=replace resource_version="" rules="" registry="" report="" ingress file rc=0
+  local links id slug status nrn paths published scope_id scope_slug backend rule selected="" owners="" duplicates
+  local ingress_name live base mismatch verb=replace resource_version="" rules="" registry="" report="" ingress file rc=0
   local scope_pattern='(^|:)scope=([0-9]+)(:|$)'
 
   echo "Listing the links of service $SERVICE_ID"
@@ -136,7 +142,26 @@ rebuild_ingress_main() {
       return 1
     fi
     scope_id="${BASH_REMATCH[2]}"
-    if [[ "$status" != "active" ]]; then
+    if [[ "$status" == "failed" ]]; then
+      if ! scope_slug=$(rebuild_ingress_scope_slug "$scope_id"); then
+        echo "The ingress was not changed; retry once the cause above is fixed."
+        return 1
+      fi
+      published=$(rebuild_ingress_registered_paths "$scope_slug" "$paths")
+      if [[ "$published" == "[]" ]]; then
+        echo "⚠ Link $slug is failed and none of its paths $paths is in the service rules; it is not published"
+        report+="  - $slug: status failed, paths $paths not published"$'\n'
+        continue
+      fi
+      if [[ "$published" != "$paths" ]]; then
+        echo "⚠ Link $slug is failed; only its paths in the service rules are kept: $published of $paths"
+        report+="  - $slug: status failed, paths $published kept of $paths"$'\n'
+        paths="$published"
+      else
+        echo "⚠ Link $slug is failed; its paths are in the service rules and are kept"
+        report+="  - $slug: status failed, paths $paths kept"$'\n'
+      fi
+    elif [[ "$status" != "active" ]]; then
       echo "⚠ Link $slug is $status; its paths are kept"
       report+="  - $slug: status $status, paths $paths kept"$'\n'
     fi
@@ -160,11 +185,19 @@ rebuild_ingress_main() {
     return 1
   fi
   ingress_name=$(jq -r '.metadata.name' <<<"$base")
-  if ! live=$(kubectl get ingress "$ingress_name" -n "$K8S_NAMESPACE" -o json --ignore-not-found); then
+  if ! live=$(last_successfully_applied_live_ingress); then
     echo "Error: could not read ingress [$ingress_name]. The ingress was not changed."
     return 1
   fi
   if [[ -n "$live" ]]; then
+    ingress_name=$(jq -r '.metadata.name' <<<"$live")
+    base=$(jq -c --arg name "$ingress_name" '.metadata.name = $name' <<<"$base")
+    mismatch=$(rebuild_ingress_alb_mismatch "$live" "$base")
+    if [[ -n "$mismatch" ]]; then
+      echo "Error: ingress [$ingress_name] uses another ALB than the one resolved now; rebuilding it would move the exposer to that ALB. The ingress was not changed."
+      echo "$mismatch"
+      return 1
+    fi
     echo "Rebuilding ingress [$ingress_name] from the template and the links"
     resource_version=$(jq -r '.metadata.resourceVersion' <<<"$live")
   else

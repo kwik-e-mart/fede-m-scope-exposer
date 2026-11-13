@@ -44,13 +44,13 @@ steps:
       file: "$SERVICE_PATH/scripts/verify_ingress_reconciliation"
       configuration:
         VERIFY_SCOPE: all
-  - name: "last_successfully_applied"
-    type: script
-    file: "$SERVICE_PATH/scripts/last_successfully_applied"
-    configuration:
-      LAST_SUCCESSFULLY_APPLIED_ACTION: save
   - name: "realign_service_rules"
     type: script
     file: "$SERVICE_PATH/scripts/update_service"
     configuration:
       ACTION: rebuild
+  - name: "last_successfully_applied"
+    type: script
+    file: "$SERVICE_PATH/scripts/last_successfully_applied"
+    configuration:
+      LAST_SUCCESSFULLY_APPLIED_ACTION: save

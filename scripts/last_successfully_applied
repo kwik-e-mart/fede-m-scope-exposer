@@ -1,14 +1,7 @@
 #!/bin/bash
 
-if ! source "$(dirname "${BASH_SOURCE[0]}")/lease_lib"; then
-  echo "Error: could not load lease_lib from $(dirname "${BASH_SOURCE[0]}")"
-  exit 1
-fi
-
-if ! source "$(dirname "${BASH_SOURCE[0]}")/last_successfully_applied_lib"; then
-  echo "Error: could not load last_successfully_applied_lib from $(dirname "${BASH_SOURCE[0]}")"
-  exit 1
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/lease_lib"
+source "$(dirname "${BASH_SOURCE[0]}")/last_successfully_applied_lib"
 
 last_successfully_applied_clean_ingress() {
   jq -c '{
@@ -74,13 +67,17 @@ last_successfully_applied_save() {
     echo "Error: LEASE_TOKEN is not set; take the Lease before saving the last successfully applied snapshot"
     return 1
   fi
-  ingress_name=$(last_successfully_applied_ingress_name)
-  if ! live=$(kubectl get ingress "$ingress_name" -n "$K8S_NAMESPACE" -o json); then
-    echo "Error: could not read ingress [$ingress_name] to save the last successfully applied snapshot"
-    return 1
-  fi
   file="$OUTPUT_DIR/$(last_successfully_applied_name).json"
   while true; do
+    if ! live=$(last_successfully_applied_live_ingress); then
+      echo "Error: could not read ingress [$(last_successfully_applied_ingress_name)] to save the last successfully applied snapshot"
+      return 1
+    fi
+    if [[ -z "$live" ]]; then
+      echo "Error: no ingress named [$(last_successfully_applied_ingress_name)] or labeled service_id=$SERVICE_ID to save the last successfully applied snapshot"
+      return 1
+    fi
+    ingress_name=$(jq -r '.metadata.name' <<<"$live")
     rc=0
     snapshot=$(last_successfully_applied_read) || rc=$?
     if (( rc == 1 )); then
@@ -125,10 +122,24 @@ last_successfully_applied_save() {
 }
 
 last_successfully_applied_delete() {
-  if ! kubectl delete configmap "$(last_successfully_applied_name)" -n "$K8S_NAMESPACE" --ignore-not-found; then
-    echo "Error: could not delete the last successfully applied snapshot $(last_successfully_applied_name)"
+  local errors message rc=0
+  if ! errors=$(mktemp); then
+    echo "Error: could not create a temporary file for kubectl delete"
     return 1
   fi
+  kubectl delete configmap "$(last_successfully_applied_name)" -n "$K8S_NAMESPACE" --ignore-not-found 2>"$errors" </dev/null || rc=$?
+  message=$(<"$errors")
+  rm -f "$errors"
+  if (( rc == 0 )); then
+    return 0
+  fi
+  if [[ "$message" == *"(Forbidden)"* && "${ALB_RECONCILIATION_ENABLED:-false}" != "true" ]]; then
+    echo "⚠ Could not delete the last successfully applied snapshot $(last_successfully_applied_name): $message. ALB_RECONCILIATION_ENABLED is not true, so no snapshot is saved; continuing"
+    return 0
+  fi
+  echo "${message:-kubectl exited with $rc}" >&2
+  echo "Error: could not delete the last successfully applied snapshot $(last_successfully_applied_name)"
+  return 1
 }
 
 last_successfully_applied_main() {

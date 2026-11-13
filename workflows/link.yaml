@@ -75,13 +75,13 @@ steps:
       name: wait ingress_reconciliation
       type: script
       file: "$SERVICE_PATH/scripts/verify_or_reapply"
-  - name: "last_successfully_applied"
-    type: script
-    file: "$SERVICE_PATH/scripts/last_successfully_applied"
-    configuration:
-      LAST_SUCCESSFULLY_APPLIED_ACTION: save
   - name: "add_rule_to_service"
     type: script
     file: "$SERVICE_PATH/scripts/update_service"
     configuration:
       ACTION: sync
+  - name: "last_successfully_applied"
+    type: script
+    file: "$SERVICE_PATH/scripts/last_successfully_applied"
+    configuration:
+      LAST_SUCCESSFULLY_APPLIED_ACTION: save

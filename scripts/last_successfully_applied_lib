@@ -8,6 +8,16 @@ last_successfully_applied_ingress_name() {
   echo "k-8-s-$SERVICE_NAME-$SERVICE_ID-public"
 }
 
+last_successfully_applied_live_ingress() {
+  local live
+  live=$(kubectl get ingress "$(last_successfully_applied_ingress_name)" -n "$K8S_NAMESPACE" -o json --ignore-not-found </dev/null) || return 1
+  if [[ -z "$live" ]]; then
+    live=$(kubectl get ingress -n "$K8S_NAMESPACE" -l "service_id=$SERVICE_ID" -o json </dev/null) || return 1
+    live=$(jq -c '.items[0] // empty' <<<"${live:-null}") || return 1
+  fi
+  echo "$live"
+}
+
 last_successfully_applied_read() {
   local errors snapshot message rc=0
   if ! errors=$(mktemp); then

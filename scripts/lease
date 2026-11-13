@@ -1,9 +1,6 @@
 #!/bin/bash
 
-if ! source "$(dirname "${BASH_SOURCE[0]}")/lease_lib"; then
-  echo "Error: could not load lease_lib from $(dirname "${BASH_SOURCE[0]}")"
-  exit 1
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/lease_lib"
 
 LEASE_DURATION_SECONDS=150
 LEASE_CHECK_INTERVAL=5
